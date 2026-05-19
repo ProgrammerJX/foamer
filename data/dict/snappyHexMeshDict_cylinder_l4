@@ -1,0 +1,58 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| 高分辨率 cylinder1 测试：surface level (4 4) → cell size 0.015625,
+| 沿 X 大约 38 圈 × 周向大约 60 facet，圆柱视觉接近平滑。
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+
+castellatedMesh true;
+snap            true;
+addLayers       false;
+
+geometry
+{
+    cylinder1.stl
+    {
+        type triSurfaceMesh;
+        name cylinder1;
+    }
+}
+
+castellatedMeshControls
+{
+    maxLocalCells       2000000;
+    maxGlobalCells      4000000;
+    minRefinementCells  0;
+    nCellsBetweenLevels 1;
+    resolveFeatureAngle 30;
+    refinementSurfaces
+    {
+        cylinder1 { level (4 4); }
+    }
+    locationInMesh (0.9 0.9 0.9);
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    nSmoothPatch       3;
+    tolerance          2.0;
+    nSolveIter         30;
+    nRelaxIter         5;
+    nFeatureSnapIter   10;
+}
+
+addLayersControls
+{
+    relativeSizes       true;
+    expansionRatio      1.2;
+    finalLayerThickness 0.3;
+    minThickness        0.1;
+    nGrow               0;
+    featureAngle        60;
+}

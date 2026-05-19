@@ -101,8 +101,17 @@ public:
 	/// 重构 phase 1 / phase 3 的谓词类型；接收 leaf 自身，返回 true 表示需要 subdivide / cull。
 	typedef std::function<bool(const Leaf&)> LeafPredicate;
 
-	/// 构造：仅记录背景网格分辨率与 level 上限（默认 4，便于把 (si,sj,sk) 塞进 4-bit 字段）。
-	XFoam_Hex8Ref(XFoam_Label nxIn, XFoam_Label nyIn, XFoam_Label nzIn, XFoam_Label levelCapIn = 4);
+	/// 构造：仅记录背景网格分辨率与 level 上限。
+	/// 默认 levelCapIn = 8 对应 encodeLeafKey 的 10-bit (si,sj,sk) 字段（最大子位置 2^10-1=1023 ≥ 2^10-1）。
+	/// 上限编码总位宽 64：ai/aj/ak 各 10 bit，level 4 bit，si/sj/sk 各 10 bit；编码端 assert 防越界。
+	XFoam_Hex8Ref(XFoam_Label nxIn, XFoam_Label nyIn, XFoam_Label nzIn, XFoam_Label levelCapIn = 8);
+
+	/// encodeLeafKey 支持的最大 level（受 (si,sj,sk) 字段宽度 = 10 bit 限制）。
+	/// 调用方通过 levelCap 传入；运行期 assert：level ≤ kMaxEncodedLevel。
+	static constexpr int kMaxEncodedLevel = 10;
+
+	/// per-level 统计桶大小（>= kMaxEncodedLevel + 1，留 safety margin）。
+	static constexpr int kMaxLevelBuckets = 16;
 
 	/// Phase 0：每个 base-cell 放 1 个 level=0 的 leaf；调用方应在 refineByPredicate 之前调一次。
 	void initBaseLeaves();
@@ -179,8 +188,9 @@ public:
 
 	XFoam_Label maxLevelReached() const;
 
-	/// 把 [0..7] 各 level 的 leaf 计数填到 out[0..7]（>=8 的 level 被忽略，但本类 levelCap<=4）。
-	void perLevelCounts(XFoam_Label out[8]) const;
+	/// 把各 level 的 leaf 计数填到 out[0..kMaxLevelBuckets-1]；>= kMaxLevelBuckets 的 level 被
+	/// 静默忽略（理论上 levelCap_ ≤ kMaxEncodedLevel < kMaxLevelBuckets，不会发生）。
+	void perLevelCounts(XFoam_Label out[kMaxLevelBuckets]) const;
 
 private:
 	XFoam_Label nx_;
@@ -214,8 +224,10 @@ private:
 		return i >= 0 && i < nx_ && j >= 0 && j < ny_ && k >= 0 && k < nz_;
 	}
 
-	// (ai, aj, ak, L, si, sj, sk) → uint64 key。布局假定 levelCap <= 4 →
-	// si/sj/sk < 16；ai/aj/ak 各 16 bit。
+	// (ai, aj, ak, L, si, sj, sk) → uint64 key。
+	// 布局（高位 → 低位）：ai[10] | aj[10] | ak[10] | level[4] | si[10] | sj[10] | sk[10] = 64 bit。
+	// 容量：base-cell 索引 ≤ 1023；level ≤ kMaxEncodedLevel(=10)；子位置 ≤ 1023。
+	// 超界会在 Debug 触发 assert（Release 走截断 + 用 leafMap 反查时极可能错位）。
 	static uint64_t encodeLeafKey(
 		XFoam_Label ai, XFoam_Label aj, XFoam_Label ak,
 		XFoam_Label level,

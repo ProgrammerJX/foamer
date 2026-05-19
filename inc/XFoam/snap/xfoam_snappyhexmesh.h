@@ -14,6 +14,7 @@
 //   - addLayers（layer 阶段算法 都没写）
 //   - feature edge snap、wordRe 模式
 
+#include "XFoam/snap/xfoam_hex8ref.h"
 #include "XFoam/snap/xfoam_layerparameters.h"
 #include "XFoam/snap/xfoam_refinementparameters.h"
 #include "XFoam/snap/xfoam_snapparameters.h"
@@ -65,7 +66,7 @@ public:
 		XFoam_Word stlPatchName;           // STL 在输出中的 patch 名（来自 dict.geometry 首项）
 		XFoam_Label refinementLevel = 0;   // 全局最大 level（来自 refinementSurfaces.<first>.level 第二个数）
 		XFoam_Label maxAdaptiveLevel = 0;  // 实际出现的最大 base-cell level（考虑 buffer 扩张后的最大值）
-		XFoam_Label perLevelCells[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+		XFoam_Label perLevelCells[XFoam_Hex8Ref::kMaxLevelBuckets] = {0};
 		XFoam_Label nPoints = 0;
 		XFoam_Label nFaces = 0;
 		XFoam_Label nInternalFaces = 0;

@@ -608,7 +608,9 @@ bool XFoam_SnappyHexMesh::run(
 	const XFoam_Scalar bbDiag = (bbMax - bbMin).mag();
 	const XFoam_Scalar eps = std::max<XFoam_Scalar>(1e-12, bbDiag * static_cast<XFoam_Scalar>(1e-9));
 	const double invEps = 1.0 / static_cast<double>(eps);
-	const int LEVEL_CAP = 4;
+	// LEVEL_CAP 受 XFoam_Hex8Ref::kMaxEncodedLevel 约束（leaf-key 编码 si/sj/sk 各 10 bit → cap ≤ 10）。
+	// 默认 8 已足以让 base-cell=0.25 的 needle/cylinder 测例（cell ~0.001）很平滑；上 9/10 再调更高分辨率。
+	const int LEVEL_CAP = std::min<int>(8, XFoam_Hex8Ref::kMaxEncodedLevel);
 	const int targetLevel = std::min<int>(static_cast<int>(globalRefinementLevel()), LEVEL_CAP);
 
 	// 通用 surface maxLevel 取上限。
@@ -673,7 +675,7 @@ bool XFoam_SnappyHexMesh::run(
 	stats.nRefinedCells = 0;
 	stats.nKeptCells = 0;
 	stats.maxAdaptiveLevel = 0;
-	for (int L = 0; L < 8; ++L) stats.perLevelCells[L] = 0;
+	for (int L = 0; L < XFoam_Hex8Ref::kMaxLevelBuckets; ++L) stats.perLevelCells[L] = 0;
 	for (XFoam_Label bi = 0; bi < nBlocks; ++bi)
 	{
 		BlockData& B = blocks[static_cast<size_t>(bi)];
@@ -694,9 +696,9 @@ bool XFoam_SnappyHexMesh::run(
 		if (nBufferLayers > 0) oct.extendHighLevel(nBufferLayers);
 		oct.balance21();
 
-		XFoam_Label pl[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+		XFoam_Label pl[XFoam_Hex8Ref::kMaxLevelBuckets] = {0};
 		oct.perLevelCounts(pl);
-		for (int L = 0; L < 8; ++L) stats.perLevelCells[L] += pl[L];
+		for (int L = 0; L < XFoam_Hex8Ref::kMaxLevelBuckets; ++L) stats.perLevelCells[L] += pl[L];
 		stats.maxAdaptiveLevel = std::max(stats.maxAdaptiveLevel, oct.maxLevelReached());
 		stats.nRefinedCells += oct.numLeaves();
 

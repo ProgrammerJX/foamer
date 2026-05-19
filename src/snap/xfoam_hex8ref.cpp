@@ -1,6 +1,7 @@
 #include "XFoam/snap/xfoam_hex8ref.h"
 
 #include <algorithm>
+#include <cassert>
 
 namespace
 {
@@ -35,13 +36,26 @@ uint64_t XFoam_Hex8Ref::encodeLeafKey(
 	XFoam_Label level,
 	XFoam_Label si, XFoam_Label sj, XFoam_Label sk)
 {
-	uint64_t k = static_cast<uint32_t>(ai);
-	k = (k << 16) | static_cast<uint32_t>(aj);
-	k = (k << 16) | static_cast<uint32_t>(ak);
-	k = (k << 4)  | static_cast<uint32_t>(level);
-	k = (k << 4)  | static_cast<uint32_t>(si);
-	k = (k << 4)  | static_cast<uint32_t>(sj);
-	k = (k << 4)  | static_cast<uint32_t>(sk);
+	// 布局：ai[10] | aj[10] | ak[10] | level[4] | si[10] | sj[10] | sk[10] = 64 bit。
+	// Debug 校验各字段未越界；Release 走 mask 截断（仍可能拓扑错乱 → 必须靠 assert 拦住）。
+	constexpr uint64_t kBaseMask  = 0x3FF; // 10 bit
+	constexpr uint64_t kLevelMask = 0xF;   // 4 bit
+	constexpr uint64_t kSubMask   = 0x3FF; // 10 bit
+	assert(ai    >= 0 && static_cast<uint64_t>(ai)    <= kBaseMask);
+	assert(aj    >= 0 && static_cast<uint64_t>(aj)    <= kBaseMask);
+	assert(ak    >= 0 && static_cast<uint64_t>(ak)    <= kBaseMask);
+	assert(level >= 0 && static_cast<uint64_t>(level) <= kLevelMask);
+	assert(si    >= 0 && static_cast<uint64_t>(si)    <= kSubMask);
+	assert(sj    >= 0 && static_cast<uint64_t>(sj)    <= kSubMask);
+	assert(sk    >= 0 && static_cast<uint64_t>(sk)    <= kSubMask);
+
+	uint64_t k = static_cast<uint64_t>(ai) & kBaseMask;
+	k = (k << 10) | (static_cast<uint64_t>(aj)    & kBaseMask);
+	k = (k << 10) | (static_cast<uint64_t>(ak)    & kBaseMask);
+	k = (k <<  4) | (static_cast<uint64_t>(level) & kLevelMask);
+	k = (k << 10) | (static_cast<uint64_t>(si)    & kSubMask);
+	k = (k << 10) | (static_cast<uint64_t>(sj)    & kSubMask);
+	k = (k << 10) | (static_cast<uint64_t>(sk)    & kSubMask);
 	return k;
 }
 
@@ -414,12 +428,12 @@ XFoam_Label XFoam_Hex8Ref::maxLevelReached() const
 	return m;
 }
 
-void XFoam_Hex8Ref::perLevelCounts(XFoam_Label out[8]) const
+void XFoam_Hex8Ref::perLevelCounts(XFoam_Label out[kMaxLevelBuckets]) const
 {
-	for (int i = 0; i < 8; ++i) out[i] = 0;
+	for (int i = 0; i < kMaxLevelBuckets; ++i) out[i] = 0;
 	for (size_t i = 0; i < leaves_.size(); ++i)
 	{
 		const XFoam_Label lv = leaves_[i].level;
-		if (lv >= 0 && lv < 8) ++out[lv];
+		if (lv >= 0 && lv < kMaxLevelBuckets) ++out[lv];
 	}
 }

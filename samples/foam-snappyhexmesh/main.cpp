@@ -175,7 +175,7 @@ int main(int argc, char** argv)
 		std::cout << "Refined cells      : " << stats.nRefinedCells
 		          << "  (max level reached " << stats.maxAdaptiveLevel << ")\n";
 		std::cout << "Level distribution :";
-		for (int L = 0; L <= 7; ++L)
+		for (int L = 0; L < XFoam_Hex8Ref::kMaxLevelBuckets; ++L)
 		{
 			if (stats.perLevelCells[L] > 0)
 			{
