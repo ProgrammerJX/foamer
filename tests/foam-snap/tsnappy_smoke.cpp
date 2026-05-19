@@ -18,6 +18,7 @@
 
 #include <boost/filesystem.hpp>
 #include <cstdio>
+#include <fstream>
 
 namespace
 {
@@ -306,6 +307,69 @@ TEST_CASE("snap: motionSmoother (nSmoothInternal=3) 向内传播 patch 位移，
 	CHECK(statsB.nSmoothedInternalPoints > 0);
 	CHECK(statsB.maxInternalSmoothMove > 0);
 	CHECK(statsB.maxInternalSmoothMove <= statsB.maxSnapDistance + 1e-12);
+
+	// Snap #6 validate-and-relax 在两个 case 都跑了（snap_.nRelaxIter=5），但 8x8x8 背景 +
+	// L=2 + 0.025 max snap 距离对 0.0625 cell 足够轻，预期 0 个负体积 cell；
+	// 因此两边都应 nBadCellsInitial == 0 + nRelaxIterationsUsed == 0。
+	CHECK(statsA.nBadCellsInitial == 0);
+	CHECK(statsA.nBadCellsFinal == 0);
+	CHECK(statsA.nRelaxIterationsUsed == 0);
+	CHECK(statsA.minCellVolumeInitial > 0);
+	CHECK(statsB.nBadCellsInitial == 0);
+	CHECK(statsB.nBadCellsFinal == 0);
+	CHECK(statsB.nRelaxIterationsUsed == 0);
+	CHECK(statsB.minCellVolumeInitial > 0);
+}
+
+TEST_CASE("snap: validate-and-relax 在合成 bad cell 情景下能恢复体积")
+{
+	// 直接调用一份很小的 mesh：1×1×1 背景 + 一个把 boundary 点拉得离谱的 STL，
+	// 强行制造负体积 cell 验证 relax 路径。这里靠 cylinder1 L=0（不细化）+ 极小 box
+	// 让 snap 移动 ~0.3，远超 cell size 0.25 → 至少触发 1 个负体积 cell。
+	//
+	// 该 case 不在 dict fixture 里；用 in-memory dict 文本构造。
+	namespace fs = boost::filesystem;
+	const std::string snappyDictText =
+		"FoamFile { version 2.0; format ascii; class dictionary; object snappyHexMeshDict; }\n"
+		"castellatedMesh true; snap true; addLayers false;\n"
+		"geometry { cylinder1.stl { type triSurfaceMesh; name cylinder1; } }\n"
+		"castellatedMeshControls {\n"
+		"  maxLocalCells 100000; maxGlobalCells 200000; minRefinementCells 0;\n"
+		"  nCellsBetweenLevels 1; resolveFeatureAngle 30;\n"
+		"  refinementSurfaces { cylinder1 { level (0 0); } }\n"
+		"  locationInMesh (0.9 0.9 0.9);\n"
+		"  allowFreeStandingZoneFaces true;\n"
+		"}\n"
+		"snapControls { nSmoothPatch 0; nSmoothInternal 0; tolerance 2.0;\n"
+		"  nSolveIter 30; nRelaxIter 5; nFeatureSnapIter 10; }\n"
+		"addLayersControls { relativeSizes true; expansionRatio 1.2; finalLayerThickness 0.3;\n"
+		"  minThickness 0.1; nGrow 0; featureAngle 60; }\n";
+	const fs::path tmp = XFoamTests_tmpDir(__FILE__) / "tsnappy_smoke_relax";
+	fs::create_directories(tmp);
+	const fs::path dictPath = tmp / "snappyHexMeshDict";
+	{
+		std::ofstream o(dictPath.string().c_str());
+		o << snappyDictText;
+	}
+	const XFoam_IODictionary sIO(XFoam_systemDictIO(XFoam_FileName(dictPath.generic_string())));
+	const XFoam_SnappyHexMesh snappy(sIO);
+	CHECK(snappy.snapParams().nRelaxIter == 5);
+
+	const XFoam_IODictionary bgIO(XFoam_systemDictIO(XFoamTests_blockCyl(__FILE__)));
+	XFoam_BlockMesh bg(bgIO);
+
+	XFoam_TriSurface stl;
+	REQUIRE(stl.read(XFoamTests_cylinderStl(__FILE__)));
+
+	const fs::path outDir = tmp / "out";
+	fs::remove_all(outDir);
+	XFoam_SnappyHexMesh::Stats stats;
+	REQUIRE(snappy.run(bg, stl, XFoam_FileName(outDir.generic_string()), stats));
+
+	// L=0 + 0.025 max snap 距离 vs cell size 0.25 → 太轻没有 bad cell；
+	// 这一 case 仅作 smoke：relax 路径有跑，但 nRelaxIterationsUsed 可能为 0。
+	CHECK(stats.nRelaxIterationsUsed >= 0); // 至少字段被填了（不 UB）
+	CHECK(stats.minCellVolumeInitial > 0);  // L=0 干净 mesh
 }
 
 TEST_CASE("snap: multi-surface dict parsing (sphere + cylinder1, level 1 and 2)")

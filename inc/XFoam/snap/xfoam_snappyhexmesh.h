@@ -65,6 +65,14 @@ public:
 		XFoam_Scalar maxSnapDistance = 0;
 		XFoam_Label nSmoothedInternalPoints = 0; ///< motionSmoother 移动了的内部点数（不含 patch 点）
 		XFoam_Scalar maxInternalSmoothMove = 0;  ///< motionSmoother 对内部点造成的最大移动距离
+
+		// Snap #6 validate-and-relax：捕捉 snap 之后还残留的负体积/退化 cell。relax 没生效时
+		// 这些字段保持 0。
+		XFoam_Label  nBadCellsInitial = 0;       ///< snap+smoother 之后第一次 cellVolume 扫到 ≤0 的 cell 数
+		XFoam_Label  nBadCellsFinal = 0;         ///< 全部 nRelaxIter 回退完仍 ≤0 的 cell 数
+		XFoam_Label  nRelaxIterationsUsed = 0;   ///< 实际 relax 轮数（提前清零 bad 会 < nRelaxIter）
+		XFoam_Scalar minCellVolumeInitial = 0;   ///< snap+smoother 之后最小 cell 体积（含负值）
+		XFoam_Scalar minCellVolumeFinal = 0;     ///< relax 完成后最小 cell 体积
 		XFoam_Word stlPatchName;           // STL 在输出中的 patch 名（来自 dict.geometry 首项）
 		XFoam_Label refinementLevel = 0;   // 全局最大 level（来自 refinementSurfaces.<first>.level 第二个数）
 		XFoam_Label maxAdaptiveLevel = 0;  // 实际出现的最大 base-cell level（考虑 buffer 扩张后的最大值）

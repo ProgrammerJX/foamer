@@ -1009,17 +1009,20 @@ bool XFoam_SnappyHexMesh::run(
 	std::sort(wallsIdx.begin(), wallsIdx.end(), byOwner);
 	for (auto& v : stlIdxBySurf) std::sort(v.begin(), v.end(), byOwner);
 
-	// ----- 8. snap：每个 surface 上的 boundary 点投到该 surface STL 最近点 -----
-	// 同时按 Snap #5 motionSmoother 把 patch 点的位移向内传播 nSmoothInternal 圈，
-	// 让最贴 STL 的内层 hex cell 不会被孤零零地拉成尖角 polyhedron。
+	// ----- 8. snap：四步 -----
+	//   8a) STL 投影 snapped 边界点
+	//   8b) Snap #5 motionSmoother：patch 位移向内传播 nSmoothInternal 圈
+	//   8c) Snap #6 validate-and-relax：找到负体积/退化 cell，对其顶点做 50% 回退，
+	//        最多 nRelaxIter 轮
+	//   8d) 统计 max snap 距离更新（如果 relax 改了位置）
 	if (phases_.snap)
 	{
 		std::vector<unsigned char> snapped(pts.size(), 0);
-		// 保存 snap 前 pts，便于 motionSmoother 计算位移 = pts_snapped - pts_orig。
-		// 仅在需要 internal smoothing 时才占用这份拷贝。
+		// 始终保存 snap 前 pts：motionSmoother 与 validate-and-relax 都要用它做位移基准 /
+		// 回退到 grid 上。这份拷贝在 L=6 cylinder1 case 大约 2 MB（250k pts × 8B floats × 3）。
 		const XFoam_Label nInternal = snap_.nSmoothInternal;
-		std::vector<XFoam_Vector3D> origPts;
-		if (nInternal > 0) origPts = pts;
+		const XFoam_Label nRelaxIt  = std::max<XFoam_Label>(0, snap_.nRelaxIter);
+		std::vector<XFoam_Vector3D> origPts = pts;
 
 		for (XFoam_Label si = 0; si < nSurf; ++si)
 		{
@@ -1041,20 +1044,17 @@ bool XFoam_SnappyHexMesh::run(
 			}
 		}
 
-		// Snap #5 motionSmoother：把 snapped 点的位移按 Jacobi/Laplacian 向内传播 N 圈。
-		// 算法（对标 OpenFOAM-13 Foam::motionSmoother）：
-		//   1) 由 face edges 构建 point→point 邻接（去重；任意 N 边形按 i-(i+1)% n 邻接）。
-		//   2) BFS 从 snapped 点出发，给所有 ≤ N 圈内的点打 ringId；ringId > N 视为远点。
-		//   3) 初始化 disp：snapped 点为 (pts_snapped - pts_orig)；其余为 0。
-		//   4) Jacobi 迭代 N 轮：每个 non-snapped 且 ringId ≤ N 的点位移 = 邻居位移均值。
-		//      只统计 ringId ≤ N 的邻居，避免远点的零位移把传播稀释。
-		//   5) 把 disp 加回 origPts：pts = origPts + disp。snapped 点的 disp 保持，pts 不变。
-		if (nInternal > 0 && stats.nSnappedPoints > 0)
-		{
-			const size_t nPts = pts.size();
+		// ----- 8a/b 完成（投影只在上面）。下面是 motionSmoother + validate-and-relax 公用的
+		// point→point 邻接表与 cell→faces 反向表。先建好，后两阶段都用。
+		const size_t nPts = pts.size();
+		const XFoam_Label nCells = stats.nKeptCells;
 
-			// (1) 邻接表。先 push edge 双向，再排序+unique 去重；用 vector 比 set 省 3-4x 内存。
-			std::vector<std::vector<int>> ptNbrs(nPts);
+		// (邻接) 由 face edges 构建 point→point 邻接（去重；任意 N 边形按 i-(i+1)% n 邻接）。
+		// 用 vector + sort/unique 比 set 省 3~4x 内存（L=6 250k pts × ~12 nbr 仍较紧凑）。
+		std::vector<std::vector<int>> ptNbrs;
+		auto buildPtNbrs = [&]() {
+			if (!ptNbrs.empty()) return;
+			ptNbrs.assign(nPts, {});
 			for (const FInfo& f : finalFaces)
 			{
 				const int n = static_cast<int>(f.verts.size());
@@ -1071,8 +1071,70 @@ bool XFoam_SnappyHexMesh::run(
 				std::sort(vec.begin(), vec.end());
 				vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
 			}
+		};
 
-			// (2) BFS 给 ringId 打标；超出 N 圈的保持 INT_MAX。
+		// (cell→faces) snap 阶段还没装配 facesOut；这里直接用 finalFaces.owner/.neighbour
+		// 反向收集每个 cell 的 face id（容量上限 = #cells，但实际平均 6）。
+		std::vector<std::vector<int>> cellFaces;
+		auto buildCellFaces = [&]() {
+			if (!cellFaces.empty()) return;
+			cellFaces.assign(static_cast<size_t>(nCells), {});
+			for (int fi = 0; fi < static_cast<int>(finalFaces.size()); ++fi)
+			{
+				const FInfo& f = finalFaces[fi];
+				if (f.owner >= 0 && f.owner < nCells)
+					cellFaces[static_cast<size_t>(f.owner)].push_back(fi);
+				if (f.neighbour >= 0 && f.neighbour < nCells)
+					cellFaces[static_cast<size_t>(f.neighbour)].push_back(fi);
+			}
+		};
+
+		// (cell 体积) 用散度定理：V = (1/3) Σ_f sign · (centroid_f · area_vec_f)。
+		// 面被 fan triangulation 切成 n-2 个三角形（从 v0 出发），各贡献：
+		//   area_vec_tri = 0.5 · (v1 - v0) × (v2 - v0)
+		//   centroid_tri = (v0 + v1 + v2) / 3
+		// 面 area_vec = Σ triangles area_vec_tri，centroid = area-weighted average centroid_tri。
+		auto cellVolume = [&](int cellId) -> XFoam_Scalar {
+			XFoam_Scalar vol = 0;
+			for (int fi : cellFaces[static_cast<size_t>(cellId)])
+			{
+				const FInfo& f = finalFaces[fi];
+				const int n = static_cast<int>(f.verts.size());
+				if (n < 3) continue;
+				const XFoam_Vector3D v0 = pts[f.verts[0]];
+				XFoam_Vector3D af(0, 0, 0);
+				XFoam_Vector3D cf(0, 0, 0);
+				XFoam_Scalar totalArea = 0;
+				for (int i = 1; i + 1 < n; ++i)
+				{
+					const XFoam_Vector3D v1 = pts[f.verts[i]];
+					const XFoam_Vector3D v2 = pts[f.verts[i + 1]];
+					const XFoam_Vector3D e1 = v1 - v0;
+					const XFoam_Vector3D e2 = v2 - v0;
+					const XFoam_Vector3D triN(
+						static_cast<XFoam_Scalar>(0.5) * (e1.y() * e2.z() - e1.z() * e2.y()),
+						static_cast<XFoam_Scalar>(0.5) * (e1.z() * e2.x() - e1.x() * e2.z()),
+						static_cast<XFoam_Scalar>(0.5) * (e1.x() * e2.y() - e1.y() * e2.x()));
+					const XFoam_Scalar triA = triN.mag();
+					const XFoam_Vector3D triC = (v0 + v1 + v2) * (static_cast<XFoam_Scalar>(1.0 / 3.0));
+					af = af + triN;
+					cf = cf + triC * triA;
+					totalArea += triA;
+				}
+				if (totalArea <= 0) continue;
+				cf = cf * (static_cast<XFoam_Scalar>(1) / totalArea);
+				const XFoam_Scalar sign = (f.owner == cellId)
+					? static_cast<XFoam_Scalar>(1)
+					: static_cast<XFoam_Scalar>(-1);
+				vol += sign * (cf.x() * af.x() + cf.y() * af.y() + cf.z() * af.z());
+			}
+			return vol * (static_cast<XFoam_Scalar>(1.0 / 3.0));
+		};
+
+		// ----- 8b. Snap #5 motionSmoother（Laplacian 向内传播 N 圈） -----
+		if (nInternal > 0 && stats.nSnappedPoints > 0)
+		{
+			buildPtNbrs();
 			const int N = static_cast<int>(nInternal);
 			std::vector<int> ringId(nPts, std::numeric_limits<int>::max());
 			{
@@ -1101,14 +1163,11 @@ bool XFoam_SnappyHexMesh::run(
 				}
 			}
 
-			// (3) 初始化 disp。
 			std::vector<XFoam_Vector3D> disp(nPts, XFoam_Vector3D(0, 0, 0));
 			for (size_t v = 0; v < nPts; ++v)
 			{
 				if (snapped[v]) disp[v] = pts[v] - origPts[v];
 			}
-
-			// (4) Jacobi 迭代 N 轮（Gauss-Seidel 也可，但用 swap 双 buffer 更并行友好）。
 			std::vector<XFoam_Vector3D> dispNew(disp);
 			for (int iter = 0; iter < N; ++iter)
 			{
@@ -1116,7 +1175,6 @@ bool XFoam_SnappyHexMesh::run(
 				{
 					if (snapped[v]) { dispNew[v] = disp[v]; continue; }
 					if (ringId[v] > N) { dispNew[v] = disp[v]; continue; }
-
 					XFoam_Vector3D sum(0, 0, 0);
 					int cnt = 0;
 					for (int u : ptNbrs[v])
@@ -1135,9 +1193,6 @@ bool XFoam_SnappyHexMesh::run(
 				}
 				std::swap(disp, dispNew);
 			}
-
-			// (5) 应用：snapped 点位移已应用在 pts 上（snap 时已 pts[v]=closest），跳过；
-			//   其它 ringId ≤ N 的点用 disp 覆盖 pts；远点 / 非传播点保持原状。
 			for (size_t v = 0; v < nPts; ++v)
 			{
 				if (snapped[v]) continue;
@@ -1150,6 +1205,76 @@ bool XFoam_SnappyHexMesh::run(
 				}
 				pts[v] = origPts[v] + disp[v];
 			}
+		}
+
+		// ----- 8c. Snap #6 validate-and-relax -----
+		// 算法（对标 OpenFOAM-13 snappySnapDriver::scaleMesh + checkMesh）：
+		//   1) 遍历 cells 计算体积；阈值 := pos & not too small。
+		//   2) 把 bad cell 的所有顶点（snapped 或被 smoother 移动过的）按 50% 回退到 origPts；
+		//      OF 的做法是缩放 displacement 而不是直接覆盖 pts，与此等价（因为 disp = pts - orig）。
+		//   3) 再算一次体积；如果还有 bad cell，再回退一次，最多 nRelaxIter 轮。
+		//   4) 失败 cell 数与最坏体积均写进 stats，调用方可决定是否报警 / 重 mesh。
+		if (nRelaxIt > 0 && nCells > 0 && stats.nSnappedPoints > 0)
+		{
+			buildCellFaces();
+			constexpr XFoam_Scalar kVolEps = static_cast<XFoam_Scalar>(1e-30);
+			constexpr XFoam_Scalar kRelaxAlpha = static_cast<XFoam_Scalar>(0.5);
+
+			auto findBadCells = [&](std::vector<int>& out, XFoam_Scalar& outMinVol) {
+				out.clear();
+				outMinVol = std::numeric_limits<XFoam_Scalar>::max();
+				for (int c = 0; c < nCells; ++c)
+				{
+					const XFoam_Scalar V = cellVolume(c);
+					if (V < outMinVol) outMinVol = V;
+					if (V <= kVolEps) out.push_back(c);
+				}
+			};
+
+			std::vector<int> badCells;
+			XFoam_Scalar minVol = 0;
+			findBadCells(badCells, minVol);
+			stats.nBadCellsInitial = static_cast<XFoam_Label>(badCells.size());
+			stats.minCellVolumeInitial = minVol;
+
+			std::vector<unsigned char> needRelax(nPts, 0);
+			XFoam_Label relaxUsed = 0;
+			while (!badCells.empty() && relaxUsed < nRelaxIt)
+			{
+				std::fill(needRelax.begin(), needRelax.end(), 0);
+				for (int c : badCells)
+				{
+					for (int fi : cellFaces[static_cast<size_t>(c)])
+					{
+						for (int v : finalFaces[fi].verts) needRelax[v] = 1;
+					}
+				}
+				// 把每个被标记的点拉回 origPts 一半；snapped 点也照样收缩，避免局部高位移
+				// 把相邻 cell 拽成负体。
+				for (size_t v = 0; v < nPts; ++v)
+				{
+					if (!needRelax[v]) continue;
+					pts[v] = origPts[v] + (pts[v] - origPts[v]) * kRelaxAlpha;
+				}
+				++relaxUsed;
+				findBadCells(badCells, minVol);
+			}
+			stats.nRelaxIterationsUsed = relaxUsed;
+			stats.nBadCellsFinal = static_cast<XFoam_Label>(badCells.size());
+			stats.minCellVolumeFinal = minVol;
+		}
+
+		// ----- 8d. 重新统计 max snap distance（relax 后 snapped pts 可能不再是 closest） -----
+		if (nRelaxIt > 0 && stats.nRelaxIterationsUsed > 0)
+		{
+			XFoam_Scalar maxMove = 0;
+			for (size_t v = 0; v < nPts; ++v)
+			{
+				if (!snapped[v]) continue;
+				const XFoam_Scalar mv = (pts[v] - origPts[v]).mag();
+				if (mv > maxMove) maxMove = mv;
+			}
+			stats.maxSnapDistance = maxMove;
 		}
 	}
 	// ----- 9. 装配 polyMesh 三大列表 + patch 表 -----

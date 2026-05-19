@@ -193,6 +193,15 @@ int main(int argc, char** argv)
 			std::cout << "Smoothed internal  : " << stats.nSmoothedInternalPoints
 			          << "  (max move " << stats.maxInternalSmoothMove << ")\n";
 		}
+		if (stats.nBadCellsInitial > 0 || stats.nRelaxIterationsUsed > 0)
+		{
+			std::cout << "Validate&relax     : "
+			          << stats.nBadCellsInitial << " bad-cell (minVol="
+			          << stats.minCellVolumeInitial << ") -> "
+			          << stats.nBadCellsFinal << " after "
+			          << stats.nRelaxIterationsUsed << " relax iter (minVol="
+			          << stats.minCellVolumeFinal << ")\n";
+		}
 		std::cout
 		          << "PolyMesh out       : "
 		          << stats.nPoints << " pts, "
