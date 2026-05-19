@@ -881,6 +881,15 @@ void XFoam_BlockMesh::createCells() const
 	}
 }
 
+/// 移植参考: OpenFOAM src/mesh/blockMesh/blockMesh/blockMeshCreate.C（Foam::blockMesh::createPatches）
+/// 命名规范: foam_code.md
+/// 移植规范: foam_code.md
+///
+/// 端到端 remap：把 dict 中按 dict-vertex 标号给出的边界面，按"哪个 block 的哪个模型面"
+/// 拆分到 Block::boundaryPatches() 预先细分好的 sub-face 列表，再加上
+/// blockOffsets_ + mergeList_ 映射到 mesh-global point 标号。
+/// 单 hex (1 1 1) 等价于直接重标号（每面 1 个 sub-face）；多 cell（如 (4 5 6)）
+/// 即按 OF 行为细分为 nj*nk / ni*nk / ni*nj 个子四边形。
 void XFoam_BlockMesh::createPatches() const
 {
 	patches_.clear();
@@ -888,9 +897,79 @@ void XFoam_BlockMesh::createPatches() const
 	{
 		return;
 	}
+
 	XFoam_WordList patchNames;
 	XFoam_FaceListList tmpBlocksPatches;
 	XFoam_PtrListDictionary<XFoam_Dictionary> patchDicts;
 	readBoundary(meshDict_, patchNames, tmpBlocksPatches, patchDicts);
-	patches_ = tmpBlocksPatches;
+
+	const XFoam_BlockMesh& blocks = *this;
+	patches_.setSize(tmpBlocksPatches.size());
+
+	for (XFoam_Label patchi = 0; patchi < tmpBlocksPatches.size(); ++patchi)
+	{
+		const XFoam_FaceList& dictFaces = tmpBlocksPatches[patchi];
+		XFoam_FaceList outFaces;
+
+		for (XFoam_Label di = 0; di < dictFaces.size(); ++di)
+		{
+			const XFoam_Face& dictFace = dictFaces[di];
+			bool matched = false;
+
+			for (XFoam_Label blockI = 0; blockI < blocks.size() && !matched; ++blockI)
+			{
+				if (!blocks.set(blockI))
+				{
+					continue;
+				}
+				const XFoam_Block& b = blocks[blockI];
+				const XFoam_CellShape& shape = b.blockShape();
+				// 仅 hex 受支持：6 个模型面。每个模型面的 4 个顶点都是 dict-vertex 标号
+				// （cellShape labels 就是 hex (v0..v7) 字段里的标号）。
+				for (XFoam_Label modelFaceI = 0; modelFaceI < 6 && !matched; ++modelFaceI)
+				{
+					const XFoam_FixedList<XFoam_Label, 4> blockFaceDict =
+						shape.faceVertexLabels(modelFaceI);
+					XFoam_Face cmpFace(4);
+					for (XFoam_Label k = 0; k < 4; ++k)
+					{
+						cmpFace[k] = blockFaceDict[static_cast<unsigned>(k)];
+					}
+					if (!XFoam_Face::sameVertices(cmpFace, dictFace))
+					{
+						continue;
+					}
+
+					const XFoam_List<XFoam_Face>& subFaces =
+						b.boundaryPatches()[static_cast<unsigned>(modelFaceI)];
+					const XFoam_Label off = blockOffsets_[blockI];
+					const XFoam_Label outBase = outFaces.size();
+					outFaces.setSize(outBase + subFaces.size());
+					for (XFoam_Label si = 0; si < subFaces.size(); ++si)
+					{
+						XFoam_Face mapped = subFaces[si];
+						for (XFoam_Label vi = 0; vi < mapped.size(); ++vi)
+						{
+							mapped[vi] = mergeList_[off + mapped[vi]];
+						}
+						outFaces[outBase + si] = mapped;
+					}
+					matched = true;
+				}
+			}
+
+			if (!matched)
+			{
+				const XFoam_IOerrorLocation loc(XFoam_ioLocDictName(meshDict_));
+				XFoam_FatalIOErrorInFunction(loc)
+					<< "boundary patch " << patchi
+					<< " face " << di
+					<< " (size " << dictFace.size()
+					<< ") does not match any hex block face"
+					<< XFoam_exit(XFoam_FatalIOError, 1);
+			}
+		}
+
+		patches_[patchi] = outFaces;
+	}
 }

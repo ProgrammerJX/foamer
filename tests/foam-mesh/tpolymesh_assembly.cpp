@@ -14,6 +14,7 @@
 // numerical assertions verify topology counts match a single hex.
 #include "doctest/doctest.h"
 #include "tcommon.h"
+#include "XFoam/block/xfoam_blockmesh.h"
 #include "XFoam/mesh/xfoam_polymesh.h"
 #include "XFoam/mesh/xfoam_shape.h"
 #include "XFoam/utilities/xfoam_common.h"
@@ -132,4 +133,93 @@ TEST_CASE("XFoam_PolyMesh ctor B: single hex, no boundary -> defaultFaces collec
 	CHECK(mesh.nFaces() == 6);
 	CHECK(mesh.nBoundaryFaces() == 6);
 	REQUIRE(mesh.boundary().size() == 1);
+}
+
+namespace
+{
+
+inline XFoam_FileName XFoamTests_blockMeshDict_e2e_singleCell(const char* testSourceFile)
+{
+	return XFoam_FileName(
+		(XFoamTests_dataDir(testSourceFile) / "dict" / "blockMeshDict_singleCellPoly")
+			.lexically_normal()
+			.generic_string());
+}
+
+inline XFoam_FileName XFoamTests_blockMeshDict_e2e_hex456(const char* testSourceFile)
+{
+	return XFoam_FileName(
+		(XFoamTests_dataDir(testSourceFile) / "dict" / "blockMeshDict_hex456")
+			.lexically_normal()
+			.generic_string());
+}
+
+XFoam_AutoPtr<XFoam_PolyMesh> assemblePolyMeshFromBlockMesh(const XFoam_BlockMesh& blocks)
+{
+	XFoam_PointField points(blocks.points());
+	XFoam_CellShapeList cellShapes(blocks.cells());
+	XFoam_FaceListList patches(blocks.patches());
+	XFoam_WordList patchNames(blocks.patchNames());
+	const XFoam_PtrListDictionary<XFoam_Dictionary> patchDicts;
+
+	return XFoam_AutoPtr<XFoam_PolyMesh>(new XFoam_PolyMesh(
+		XFoam_move(points),
+		cellShapes,
+		patches,
+		XFoam_move(patchNames),
+		patchDicts,
+		XFoam_Word("defaultFaces"),
+		XFoam_Word(XFoam_PolyPatch::typeName)));
+}
+
+} // namespace
+
+TEST_CASE("blockMeshDict -> PolyMesh end-to-end: single hex (1 1 1)")
+{
+	const XFoam_FileName dictPath = XFoamTests_blockMeshDict_e2e_singleCell(__FILE__);
+	REQUIRE(dictPath.type() == XFoam_FileType::file);
+
+	const XFoam_IODictionary meshDictIO(XFoam_systemDictIO(dictPath));
+	XFoam_BlockMesh blocks(meshDictIO);
+	REQUIRE(blocks.cells().size() == 1);
+	REQUIRE(blocks.points().size() == 8);
+	REQUIRE(blocks.patches().size() == 1);
+	REQUIRE(blocks.patches()[0].size() == 6);
+
+	XFoam_AutoPtr<XFoam_PolyMesh> meshPtr = assemblePolyMeshFromBlockMesh(blocks);
+	REQUIRE(meshPtr.valid());
+	const XFoam_PolyMesh& mesh = meshPtr();
+
+	CHECK(mesh.nPoints() == 8);
+	CHECK(mesh.nCells() == 1);
+	CHECK(mesh.nInternalFaces() == 0);
+	CHECK(mesh.nBoundaryFaces() == 6);
+	CHECK(mesh.nFaces() == 6);
+	REQUIRE(mesh.boundary().size() >= 1);
+}
+
+TEST_CASE("blockMeshDict -> PolyMesh end-to-end: single hex block (4 5 6)")
+{
+	const XFoam_FileName dictPath = XFoamTests_blockMeshDict_e2e_hex456(__FILE__);
+	REQUIRE(dictPath.type() == XFoam_FileType::file);
+
+	const XFoam_IODictionary meshDictIO(XFoam_systemDictIO(dictPath));
+	XFoam_BlockMesh blocks(meshDictIO);
+	REQUIRE(blocks.cells().size() == 120);
+	REQUIRE(blocks.points().size() == 210);
+	REQUIRE(blocks.patches().size() == 1);
+	// 单 hex 块 (4,5,6)：6 个块面分别细分为 5*6 + 5*6 + 4*6 + 4*6 + 4*5 + 4*5 = 148 个子四边形。
+	REQUIRE(blocks.patches()[0].size() == 148);
+
+	XFoam_AutoPtr<XFoam_PolyMesh> meshPtr = assemblePolyMeshFromBlockMesh(blocks);
+	REQUIRE(meshPtr.valid());
+	const XFoam_PolyMesh& mesh = meshPtr();
+
+	// 4*5*6 = 120 cells；内面 = (4-1)*5*6 + 4*(5-1)*6 + 4*5*(6-1) = 90 + 96 + 100 = 286；
+	// 边界面 = 2*(5*6 + 4*6 + 4*5) = 148；总面 = 286 + 148 = 434。
+	CHECK(mesh.nPoints() == 210);
+	CHECK(mesh.nCells() == 120);
+	CHECK(mesh.nInternalFaces() == 286);
+	CHECK(mesh.nBoundaryFaces() == 148);
+	CHECK(mesh.nFaces() == 434);
 }
