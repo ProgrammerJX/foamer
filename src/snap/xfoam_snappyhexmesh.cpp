@@ -1010,9 +1010,17 @@ bool XFoam_SnappyHexMesh::run(
 	for (auto& v : stlIdxBySurf) std::sort(v.begin(), v.end(), byOwner);
 
 	// ----- 8. snap：每个 surface 上的 boundary 点投到该 surface STL 最近点 -----
+	// 同时按 Snap #5 motionSmoother 把 patch 点的位移向内传播 nSmoothInternal 圈，
+	// 让最贴 STL 的内层 hex cell 不会被孤零零地拉成尖角 polyhedron。
 	if (phases_.snap)
 	{
 		std::vector<unsigned char> snapped(pts.size(), 0);
+		// 保存 snap 前 pts，便于 motionSmoother 计算位移 = pts_snapped - pts_orig。
+		// 仅在需要 internal smoothing 时才占用这份拷贝。
+		const XFoam_Label nInternal = snap_.nSmoothInternal;
+		std::vector<XFoam_Vector3D> origPts;
+		if (nInternal > 0) origPts = pts;
+
 		for (XFoam_Label si = 0; si < nSurf; ++si)
 		{
 			if (!stls[si] || stls[si]->empty()) continue;
@@ -1030,6 +1038,117 @@ bool XFoam_SnappyHexMesh::run(
 					pts[v] = closest;
 					++stats.nSnappedPoints;
 				}
+			}
+		}
+
+		// Snap #5 motionSmoother：把 snapped 点的位移按 Jacobi/Laplacian 向内传播 N 圈。
+		// 算法（对标 OpenFOAM-13 Foam::motionSmoother）：
+		//   1) 由 face edges 构建 point→point 邻接（去重；任意 N 边形按 i-(i+1)% n 邻接）。
+		//   2) BFS 从 snapped 点出发，给所有 ≤ N 圈内的点打 ringId；ringId > N 视为远点。
+		//   3) 初始化 disp：snapped 点为 (pts_snapped - pts_orig)；其余为 0。
+		//   4) Jacobi 迭代 N 轮：每个 non-snapped 且 ringId ≤ N 的点位移 = 邻居位移均值。
+		//      只统计 ringId ≤ N 的邻居，避免远点的零位移把传播稀释。
+		//   5) 把 disp 加回 origPts：pts = origPts + disp。snapped 点的 disp 保持，pts 不变。
+		if (nInternal > 0 && stats.nSnappedPoints > 0)
+		{
+			const size_t nPts = pts.size();
+
+			// (1) 邻接表。先 push edge 双向，再排序+unique 去重；用 vector 比 set 省 3-4x 内存。
+			std::vector<std::vector<int>> ptNbrs(nPts);
+			for (const FInfo& f : finalFaces)
+			{
+				const int n = static_cast<int>(f.verts.size());
+				for (int i = 0; i < n; ++i)
+				{
+					const int v1 = f.verts[i];
+					const int v2 = f.verts[(i + 1) % n];
+					ptNbrs[static_cast<size_t>(v1)].push_back(v2);
+					ptNbrs[static_cast<size_t>(v2)].push_back(v1);
+				}
+			}
+			for (auto& vec : ptNbrs)
+			{
+				std::sort(vec.begin(), vec.end());
+				vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+			}
+
+			// (2) BFS 给 ringId 打标；超出 N 圈的保持 INT_MAX。
+			const int N = static_cast<int>(nInternal);
+			std::vector<int> ringId(nPts, std::numeric_limits<int>::max());
+			{
+				std::vector<int> frontier;
+				frontier.reserve(stats.nSnappedPoints);
+				for (size_t v = 0; v < nPts; ++v)
+				{
+					if (snapped[v]) { ringId[v] = 0; frontier.push_back(static_cast<int>(v)); }
+				}
+				for (int r = 0; r < N && !frontier.empty(); ++r)
+				{
+					std::vector<int> next;
+					next.reserve(frontier.size() * 2);
+					for (int v : frontier)
+					{
+						for (int u : ptNbrs[static_cast<size_t>(v)])
+						{
+							if (ringId[u] > r + 1)
+							{
+								ringId[u] = r + 1;
+								next.push_back(u);
+							}
+						}
+					}
+					frontier.swap(next);
+				}
+			}
+
+			// (3) 初始化 disp。
+			std::vector<XFoam_Vector3D> disp(nPts, XFoam_Vector3D(0, 0, 0));
+			for (size_t v = 0; v < nPts; ++v)
+			{
+				if (snapped[v]) disp[v] = pts[v] - origPts[v];
+			}
+
+			// (4) Jacobi 迭代 N 轮（Gauss-Seidel 也可，但用 swap 双 buffer 更并行友好）。
+			std::vector<XFoam_Vector3D> dispNew(disp);
+			for (int iter = 0; iter < N; ++iter)
+			{
+				for (size_t v = 0; v < nPts; ++v)
+				{
+					if (snapped[v]) { dispNew[v] = disp[v]; continue; }
+					if (ringId[v] > N) { dispNew[v] = disp[v]; continue; }
+
+					XFoam_Vector3D sum(0, 0, 0);
+					int cnt = 0;
+					for (int u : ptNbrs[v])
+					{
+						if (ringId[u] > N) continue; // 远点（disp ≡ 0）不参与平均，否则会拖弱传播
+						sum.x() += disp[u].x();
+						sum.y() += disp[u].y();
+						sum.z() += disp[u].z();
+						++cnt;
+					}
+					if (cnt > 0)
+					{
+						const XFoam_Scalar inv = static_cast<XFoam_Scalar>(1) / static_cast<XFoam_Scalar>(cnt);
+						dispNew[v] = sum * inv;
+					}
+				}
+				std::swap(disp, dispNew);
+			}
+
+			// (5) 应用：snapped 点位移已应用在 pts 上（snap 时已 pts[v]=closest），跳过；
+			//   其它 ringId ≤ N 的点用 disp 覆盖 pts；远点 / 非传播点保持原状。
+			for (size_t v = 0; v < nPts; ++v)
+			{
+				if (snapped[v]) continue;
+				if (ringId[v] > N) continue;
+				const XFoam_Scalar mv = disp[v].mag();
+				if (mv > 0)
+				{
+					++stats.nSmoothedInternalPoints;
+					if (mv > stats.maxInternalSmoothMove) stats.maxInternalSmoothMove = mv;
+				}
+				pts[v] = origPts[v] + disp[v];
 			}
 		}
 	}

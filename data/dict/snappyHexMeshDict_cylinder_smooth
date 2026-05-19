@@ -1,0 +1,61 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| Variant of snappyHexMeshDict_cylinder with motionSmoother enabled.
+| 设置 nSmoothInternal=3 把 patch 点位移向内传播 3 圈，让贴 STL 的内层 hex cell
+| 也能整体被拉拽 → 防止只有最外层一圈 cell 被扭成尖角。其它参数与
+| snappyHexMeshDict_cylinder 完全一致，便于做 A/B 对比。
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+
+castellatedMesh true;
+snap            true;
+addLayers       false;
+
+geometry
+{
+    cylinder1.stl
+    {
+        type triSurfaceMesh;
+        name cylinder1;
+    }
+}
+
+castellatedMeshControls
+{
+    maxLocalCells       200000;
+    maxGlobalCells      400000;
+    minRefinementCells  0;
+    nCellsBetweenLevels 1;
+    resolveFeatureAngle 30;
+    refinementSurfaces
+    {
+        cylinder1 { level (2 2); }
+    }
+    locationInMesh (0.9 0.9 0.9);
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    nSmoothPatch       3;
+    nSmoothInternal    3; // 内部 Laplacian 平滑 3 圈
+    tolerance          2.0;
+    nSolveIter         30;
+    nRelaxIter         5;
+    nFeatureSnapIter   10;
+}
+
+addLayersControls
+{
+    relativeSizes       true;
+    expansionRatio      1.2;
+    finalLayerThickness 0.3;
+    minThickness        0.1;
+    nGrow               0;
+    featureAngle        60;
+}

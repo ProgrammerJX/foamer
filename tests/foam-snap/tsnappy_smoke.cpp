@@ -251,6 +251,63 @@ TEST_CASE("snap: 2-block background ([−1,0]∪[0,1]×[−1,1]²) gives same me
 	CHECK(fs::is_regular_file(outDir / "boundary"));
 }
 
+inline XFoam_FileName XFoamTests_snappyCylSmooth(const char* f)
+{
+	return XFoam_FileName(
+		(XFoamTests_dataDir(f) / "dict" / "snappyHexMeshDict_cylinder_smooth")
+			.lexically_normal().generic_string());
+}
+
+TEST_CASE("snap: motionSmoother (nSmoothInternal=3) 向内传播 patch 位移，A/B 与裸 snap 对比")
+{
+	namespace fs = boost::filesystem;
+	const XFoam_IODictionary bgIO(XFoam_systemDictIO(XFoamTests_blockCyl(__FILE__)));
+	XFoam_BlockMesh bg(bgIO);
+	REQUIRE(bg.cells().size() == 512);
+
+	XFoam_TriSurface stl;
+	REQUIRE(stl.read(XFoamTests_cylinderStl(__FILE__)));
+
+	// ---- A) 裸 snap（snappyHexMeshDict_cylinder, nSmoothInternal=0 默认） ----
+	XFoam_SnappyHexMesh::Stats statsA;
+	{
+		const XFoam_IODictionary sIO(XFoam_systemDictIO(XFoamTests_snappyCyl(__FILE__)));
+		const XFoam_SnappyHexMesh snappy(sIO);
+		CHECK(snappy.snapParams().nSmoothInternal == 0);
+		const fs::path outDir = XFoamTests_tmpDir(__FILE__) / "tsnappy_smoke_smoothA";
+		fs::remove_all(outDir);
+		REQUIRE(snappy.run(bg, stl, XFoam_FileName(outDir.generic_string()), statsA));
+	}
+	CHECK(statsA.nSmoothedInternalPoints == 0);
+	CHECK(statsA.maxInternalSmoothMove == doctest::Approx(0));
+
+	// ---- B) 同 case 但 nSmoothInternal=3 ----
+	XFoam_SnappyHexMesh::Stats statsB;
+	{
+		const XFoam_IODictionary sIO(XFoam_systemDictIO(XFoamTests_snappyCylSmooth(__FILE__)));
+		const XFoam_SnappyHexMesh snappy(sIO);
+		CHECK(snappy.snapParams().nSmoothInternal == 3);
+		const fs::path outDir = XFoamTests_tmpDir(__FILE__) / "tsnappy_smoke_smoothB";
+		fs::remove_all(outDir);
+		REQUIRE(snappy.run(bg, stl, XFoam_FileName(outDir.generic_string()), statsB));
+	}
+
+	// 拓扑（cell/face/point/snap 数）不应受 smoother 影响：smoother 只改 pts 坐标。
+	CHECK(statsB.nKeptCells == statsA.nKeptCells);
+	CHECK(statsB.nFaces == statsA.nFaces);
+	CHECK(statsB.nInternalFaces == statsA.nInternalFaces);
+	CHECK(statsB.nBoundaryFaces == statsA.nBoundaryFaces);
+	CHECK(statsB.nPoints == statsA.nPoints);
+	CHECK(statsB.nSnappedPoints == statsA.nSnappedPoints);
+	CHECK(statsB.maxSnapDistance == doctest::Approx(statsA.maxSnapDistance));
+
+	// motionSmoother 必须真正动了 ≥1 个内部点（且移动距离 > 0），
+	// 但不应超过 STL 最大 snap 距离（位移是从 boundary 向内 averaged 出来的）。
+	CHECK(statsB.nSmoothedInternalPoints > 0);
+	CHECK(statsB.maxInternalSmoothMove > 0);
+	CHECK(statsB.maxInternalSmoothMove <= statsB.maxSnapDistance + 1e-12);
+}
+
 TEST_CASE("snap: multi-surface dict parsing (sphere + cylinder1, level 1 and 2)")
 {
 	const XFoam_FileName dictPath(XFoamTests_snappyMulti(__FILE__));

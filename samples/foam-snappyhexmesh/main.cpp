@@ -187,7 +187,13 @@ int main(int argc, char** argv)
 		          << "Polyhedral cells   : " << stats.nPolyhedralCells
 		          << "  (split faces=" << stats.nSplitFaces << ")\n"
 		          << "Snapped points     : " << stats.nSnappedPoints
-		          << "  (max move " << stats.maxSnapDistance << ")\n"
+		          << "  (max move " << stats.maxSnapDistance << ")\n";
+		if (stats.nSmoothedInternalPoints > 0)
+		{
+			std::cout << "Smoothed internal  : " << stats.nSmoothedInternalPoints
+			          << "  (max move " << stats.maxInternalSmoothMove << ")\n";
+		}
+		std::cout
 		          << "PolyMesh out       : "
 		          << stats.nPoints << " pts, "
 		          << stats.nKeptCells << " cells, "

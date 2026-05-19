@@ -63,6 +63,8 @@ public:
 		XFoam_Label nKeptCells = 0;        // STL 切除后保留 cell 数（== 最终 polyMesh 的 nCells）
 		XFoam_Label nSnappedPoints = 0;    // 投到 STL 上的边界点数
 		XFoam_Scalar maxSnapDistance = 0;
+		XFoam_Label nSmoothedInternalPoints = 0; ///< motionSmoother 移动了的内部点数（不含 patch 点）
+		XFoam_Scalar maxInternalSmoothMove = 0;  ///< motionSmoother 对内部点造成的最大移动距离
 		XFoam_Word stlPatchName;           // STL 在输出中的 patch 名（来自 dict.geometry 首项）
 		XFoam_Label refinementLevel = 0;   // 全局最大 level（来自 refinementSurfaces.<first>.level 第二个数）
 		XFoam_Label maxAdaptiveLevel = 0;  // 实际出现的最大 base-cell level（考虑 buffer 扩张后的最大值）
