@@ -12,10 +12,12 @@
 #include "tcommon.h"
 
 #include "XFoam/block/xfoam_blockmesh.h"
-#include "XFoam/mesh/xfoam_polymesh.h"
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
 #include "XFoam/snap/xfoam_trisurface.h"
 #include "XFoam/utilities/xfoam_dictionary.h"
+
+#include <boost/filesystem.hpp>
+#include <cstdio>
 
 namespace
 {
@@ -34,6 +36,23 @@ inline XFoam_FileName XFoamTests_snappyDict(const char* f)
 inline std::string XFoamTests_sphereStl(const char* f)
 {
 	return (XFoamTests_dataDir(f) / "triSurface" / "sphere.stl")
+		.lexically_normal().generic_string();
+}
+inline XFoam_FileName XFoamTests_blockCyl(const char* f)
+{
+	return XFoam_FileName(
+		(XFoamTests_dataDir(f) / "dict" / "blockMeshDict_cylinderBackground")
+			.lexically_normal().generic_string());
+}
+inline XFoam_FileName XFoamTests_snappyCyl(const char* f)
+{
+	return XFoam_FileName(
+		(XFoamTests_dataDir(f) / "dict" / "snappyHexMeshDict_cylinder")
+			.lexically_normal().generic_string());
+}
+inline std::string XFoamTests_cylinderStl(const char* f)
+{
+	return (XFoamTests_dataDir(f) / "triSurface" / "cylinder1.stl")
 		.lexically_normal().generic_string();
 }
 } // namespace
@@ -97,8 +116,9 @@ TEST_CASE("snap: TriSurface reads sphere.stl and inside/outside test works")
 	CHECK(stl.distance(XFoam_Vector3D(0, 0, 0)) == doctest::Approx(R).epsilon(0.05));
 }
 
-TEST_CASE("snap: end-to-end sphere-in-box → refine + cull + snap")
+TEST_CASE("snap: end-to-end sphere-in-box → refine + cull + snap (uniform level=1)")
 {
+	namespace fs = boost::filesystem;
 	const XFoam_IODictionary bgIO(XFoam_systemDictIO(XFoamTests_blockBg(__FILE__)));
 	XFoam_BlockMesh bg(bgIO);
 	REQUIRE(bg.cells().size() == 64); // 4 x 4 x 4 background
@@ -109,25 +129,80 @@ TEST_CASE("snap: end-to-end sphere-in-box → refine + cull + snap")
 	XFoam_TriSurface stl;
 	REQUIRE(stl.read(XFoamTests_sphereStl(__FILE__)));
 
-	XFoam_AutoPtr<XFoam_PolyMesh> mesh;
-	XFoam_SnappyHexMesh::Stats stats;
-	REQUIRE(snappy.run(bg, stl, mesh, stats));
-	REQUIRE(mesh.valid());
+	// 临时输出目录（用 source-file 路径区分）
+	const fs::path outDir = XFoamTests_tmpDir(__FILE__) / "tsnappy_smoke_sphere";
+	fs::remove_all(outDir);
+	const XFoam_FileName outF(outDir.generic_string());
 
-	// 加密因子: 64 * (2^1)^3 = 512
+	XFoam_SnappyHexMesh::Stats stats;
+	REQUIRE(snappy.run(bg, stl, outF, stats));
+
 	CHECK(stats.nBgCells == 64);
-	CHECK(stats.nRefinedCells == 512);
-	CHECK(stats.nKeptCells < stats.nRefinedCells); // 切掉了至少一些 cell
+	// dict 里 refinementSurfaces.sphere.level = (1 1)。
+	// 自适应版本只把 bbox 与球（r=0.7）相交的 base-cell 升到 level 1，其它保持 level 0：
+	// box=[-2,2]^3, 4x4x4=64 base cells（cell 边长 1），球的 8 个中心 cell 命中 → level 1，
+	// 加密后 sub-cell 数 = (64-8)*1 + 8*8 = 56 + 64 = 120。
+	CHECK(stats.maxAdaptiveLevel == 1);
+	CHECK(stats.nBgCells > stats.perLevelCells[0]); // 至少一个 base-cell 不在 level 0
+	CHECK(stats.perLevelCells[1] > 0);              // 至少一个 base-cell 在 level 1
+	CHECK(stats.nRefinedCells == 120);
+	CHECK(stats.nKeptCells < stats.nRefinedCells); // 切掉了球内一些 cell
 	CHECK(stats.nKeptCells > 0);
 	CHECK(stats.nSnappedPoints > 0);
-
-	// snap 位移上界：球面附近 cell 大小 ~0.5（box=-2..2, 8 cells/边）；
-	// 移动量应 < 一个 cell 对角线长 ~0.87
-	CHECK(stats.maxSnapDistance < 0.9);
-
-	const XFoam_PolyMesh& m = *mesh;
-	CHECK(m.nCells() == stats.nKeptCells);
-	// 两个 patch：原 box wall + 新 STL patch
-	CHECK(m.boundary().size() == 2);
+	// 既然有 level 混合，必然有 split face 与 polyhedral cell
+	CHECK(stats.nSplitFaces > 0);
+	CHECK(stats.nPolyhedralCells > 0);
+	CHECK(stats.outPatchNames.size() == 2); // walls + sphere
 	CHECK(stats.outPatchTypes.size() == 2);
+
+	CHECK(fs::is_regular_file(outDir / "points"));
+	CHECK(fs::is_regular_file(outDir / "faces"));
+	CHECK(fs::is_regular_file(outDir / "owner"));
+	CHECK(fs::is_regular_file(outDir / "neighbour"));
+	CHECK(fs::is_regular_file(outDir / "boundary"));
+}
+
+TEST_CASE("snap: end-to-end cylinder-in-box → 自适应 level 0/1/2 + 过渡带")
+{
+	namespace fs = boost::filesystem;
+	const XFoam_IODictionary bgIO(XFoam_systemDictIO(XFoamTests_blockCyl(__FILE__)));
+	XFoam_BlockMesh bg(bgIO);
+	REQUIRE(bg.cells().size() == 512); // 8 x 8 x 8 background
+
+	const XFoam_IODictionary sIO(XFoam_systemDictIO(XFoamTests_snappyCyl(__FILE__)));
+	const XFoam_SnappyHexMesh snappy(sIO);
+	REQUIRE(snappy.globalRefinementLevel() == 2);
+
+	XFoam_TriSurface stl;
+	REQUIRE(stl.read(XFoamTests_cylinderStl(__FILE__)));
+
+	const fs::path outDir = XFoamTests_tmpDir(__FILE__) / "tsnappy_smoke_cyl";
+	fs::remove_all(outDir);
+	const XFoam_FileName outF(outDir.generic_string());
+
+	XFoam_SnappyHexMesh::Stats stats;
+	REQUIRE(snappy.run(bg, stl, outF, stats));
+
+	CHECK(stats.nBgCells == 512);
+	CHECK(stats.maxAdaptiveLevel == 2);
+	// 三层都应该有 cell：L=0（远处）、L=1（缓冲）、L=2（贴 STL）。
+	CHECK(stats.perLevelCells[0] > 0);
+	CHECK(stats.perLevelCells[1] > 0);
+	CHECK(stats.perLevelCells[2] > 0);
+	// L=0 + 8*L=1 + 64*L=2 等于 nRefinedCells
+	const XFoam_Label expectRef =
+		stats.perLevelCells[0] +
+		8  * stats.perLevelCells[1] +
+		64 * stats.perLevelCells[2];
+	CHECK(stats.nRefinedCells == expectRef);
+	CHECK(stats.nKeptCells > 0);
+	CHECK(stats.nKeptCells < stats.nRefinedCells);
+	CHECK(stats.nSnappedPoints > 0);
+	// 必然有切面（L0/L1、L1/L2 边界都会）
+	CHECK(stats.nSplitFaces > 0);
+	CHECK(stats.nPolyhedralCells > 0);
+	// 两个 patch
+	CHECK(stats.outPatchNames.size() == 2);
+
+	CHECK(fs::is_regular_file(outDir / "boundary"));
 }

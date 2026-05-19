@@ -16,7 +16,6 @@
 
 #include "XFoam/XFoam_API.h"
 #include "XFoam/block/xfoam_blockmesh.h"
-#include "XFoam/mesh/xfoam_polymesh.h"
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
 #include "XFoam/snap/xfoam_trisurface.h"
 #include "XFoam/utilities/xfoam_common.h"
@@ -25,6 +24,7 @@
 
 #include <boost/filesystem.hpp>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
 
@@ -148,34 +148,59 @@ int main(int argc, char** argv)
 		          << snappy.refineParams().locationInMesh.y() << ','
 		          << snappy.refineParams().locationInMesh.z() << ')' << std::endl;
 
-		XFoam_AutoPtr<XFoam_PolyMesh> mesh;
 		XFoam_SnappyHexMesh::Stats stats;
-		if (!snappy.run(bg, stl, mesh, stats))
+		if (!snappy.run(bg, stl, toX(outDir), stats))
 		{
 			std::cerr << "snappy.run() failed.\n";
 			return 1;
 		}
 		std::cout << "Refined cells      : " << stats.nRefinedCells
-		          << "  (background " << stats.nBgCells
-		          << " x " << (1 << static_cast<int>(stats.refinementLevel)) << "^3)\n"
-		          << "Kept cells         : " << stats.nKeptCells << "\n"
-		          << "Snapped points     : " << stats.nSnappedPoints
-		          << "  (max move " << stats.maxSnapDistance << ")\n";
-
-		const XFoam_PolyMesh& m = mesh();
-		std::cout << "PolyMesh out       : "
-		          << m.nPoints() << " pts, "
-		          << m.nCells()  << " cells, "
-		          << m.nFaces()  << " faces ("
-		          << m.nInternalFaces() << " int, "
-		          << m.nBoundaryFaces() << " bnd)\n";
-
-		if (!m.writePolyMeshDir(toX(outDir), stats.outPatchTypes))
+		          << "  (max level reached " << stats.maxAdaptiveLevel << ")\n";
+		std::cout << "Level distribution :";
+		for (int L = 0; L <= 7; ++L)
 		{
-			std::cerr << "failed to write polyMesh to " << outDir.string() << "\n";
-			return 1;
+			if (stats.perLevelCells[L] > 0)
+			{
+				std::cout << "  L" << L << "=" << stats.perLevelCells[L];
+			}
 		}
-		std::cout << "Wrote " << outDir.string() << "\n";
+		std::cout << " (base cells)\n";
+		std::cout << "Kept cells         : " << stats.nKeptCells << "\n"
+		          << "Polyhedral cells   : " << stats.nPolyhedralCells
+		          << "  (split faces=" << stats.nSplitFaces << ")\n"
+		          << "Snapped points     : " << stats.nSnappedPoints
+		          << "  (max move " << stats.maxSnapDistance << ")\n"
+		          << "PolyMesh out       : "
+		          << stats.nPoints << " pts, "
+		          << stats.nKeptCells << " cells, "
+		          << stats.nFaces << " faces ("
+		          << stats.nInternalFaces << " int, "
+		          << stats.nBoundaryFaces << " bnd)\n"
+		          << "Wrote " << outDir.string() << "\n";
+
+		// 顺便给 case 写个最小 controlDict（ParaView 通过它识别 case），
+		// 只有当 outDir 看起来是 <case>/constant/polyMesh 时才写。
+		const fs::path maybeCase = outDir.parent_path().parent_path();
+		if (outDir.filename() == "polyMesh" && outDir.parent_path().filename() == "constant")
+		{
+			const fs::path sysDir = maybeCase / "system";
+			fs::create_directories(sysDir);
+			const fs::path cd = sysDir / "controlDict";
+			if (!fs::exists(cd))
+			{
+				std::ofstream of(cd.string());
+				of << "FoamFile\n{\n    version 2.0;\n    format ascii;\n    class dictionary;\n"
+				   << "    location \"system\";\n    object controlDict;\n}\n\n"
+				   << "application snappyHexMesh; startFrom startTime; startTime 0;\n"
+				   << "stopAt endTime; endTime 1; deltaT 1; writeControl runTime; writeInterval 1;\n";
+			}
+			// 同时写一个空白的 .foam 提示文件，方便 ParaView 直接打开。
+			const fs::path foamFile = maybeCase / (maybeCase.filename().string() + ".foam");
+			if (!fs::exists(foamFile))
+			{
+				std::ofstream(foamFile.string()).close();
+			}
+		}
 	}
 	catch (const XFoam_Error& e)
 	{

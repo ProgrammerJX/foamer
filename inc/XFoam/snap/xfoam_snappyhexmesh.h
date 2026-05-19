@@ -21,12 +21,12 @@
 #include "XFoam/snap/xfoam_trisurface.h"
 #include "XFoam/utilities/xfoam_autoptr.h"
 #include "XFoam/utilities/xfoam_common.h"
+#include "XFoam/utilities/xfoam_types.h"
 
 #include <string>
 
 class XFoam_BlockMesh;
 class XFoam_Dictionary;
-class XFoam_PolyMesh;
 
 /*---------------------------------------------------------------------------*\
                     Class XFoam_SnappyHexMesh Declaration
@@ -44,16 +44,23 @@ public:
 
 	struct Stats
 	{
-		XFoam_Label nBgCells = 0;
-		XFoam_Label nRefinedCells = 0;
-		XFoam_Label nKeptCells = 0;
-		XFoam_Label nSnappedPoints = 0;
+		XFoam_Label nBgCells = 0;          // 背景 blockMesh 的 cell 数（单 block 时即 nx*ny*nz）
+		XFoam_Label nRefinedCells = 0;     // 细化后未做剔除时的 sub-cell 总数
+		XFoam_Label nKeptCells = 0;        // STL 切除后保留 cell 数（== 最终 polyMesh 的 nCells）
+		XFoam_Label nSnappedPoints = 0;    // 投到 STL 上的边界点数
 		XFoam_Scalar maxSnapDistance = 0;
-		XFoam_Word stlPatchName;
-		XFoam_Label refinementLevel = 0;
-		// 与生成的 PolyMesh.boundary() 一一对应的 patch type 列表（如 "wall", "patch"），
-		// 用作 XFoam_PolyMesh::writePolyMeshDir 的 patchTypes 入参。
-		XFoam_WordList outPatchTypes;
+		XFoam_Word stlPatchName;           // STL 在输出中的 patch 名（来自 dict.geometry 首项）
+		XFoam_Label refinementLevel = 0;   // 全局最大 level（来自 refinementSurfaces.<first>.level 第二个数）
+		XFoam_Label maxAdaptiveLevel = 0;  // 实际出现的最大 base-cell level（考虑 buffer 扩张后的最大值）
+		XFoam_Label perLevelCells[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+		XFoam_Label nPoints = 0;
+		XFoam_Label nFaces = 0;
+		XFoam_Label nInternalFaces = 0;
+		XFoam_Label nBoundaryFaces = 0;
+		XFoam_Label nSplitFaces = 0;       // 因相邻 level 不同被切的面数（diff=1 → 1 face 切成 4 sub-quads）
+		XFoam_Label nPolyhedralCells = 0;  // 至少有 1 面被切的 sub-cell 数（topology 上是 polyhedron）
+		XFoam_WordList outPatchNames;
+		XFoam_WordList outPatchTypes;      // 与 outPatchNames 一一对应
 	};
 
 	/// 读 snappyHexMeshDict 子段；不持有 BlockMesh / STL。
@@ -68,16 +75,25 @@ public:
 	const XFoam_Word& firstSurfaceName() const noexcept { return firstSurfaceName_; }
 	const XFoam_FileName& firstSurfaceFile() const noexcept { return firstSurfaceFile_; }
 
-	/// 执行 castellatedMesh + snap，构造一个新的 polyMesh 返回。
-	/// \param bg          背景 BlockMesh（必须是单 hex 块，density >= 1）
-	/// \param stl         读好的三角面（不能空，必须水密）
-	/// \param outPolyMesh 出参：填入 owned 新 polyMesh（caller 持有 AutoPtr）
-	/// \param stats       出参：诊断统计
-	/// \return true 若成功；false 即非可恢复错误。
+	/// 自适应 castellatedMesh + snap，直接把生成的 polyMesh 目录写到磁盘。
+	///
+	/// 算法概要：
+	///   1) 基于背景 blockMesh 第 0 个 hex 块建结构化基网格 (nx0, ny0, nz0)。
+	///   2) 为每个 base-cell 分配一个 level：bbox 与 STL 三角面 bbox 有交集的取
+	///      refinementSurfaces.<first>.level 的 max，其他取 0。再按 nCellsBetweenLevels
+	///      做缓冲带扩张，保证相邻 level 差不超过 1。
+	///   3) 每个 base-cell 内按 2^level 三轴均匀剖分成 strict-hex sub-cells，cell 中心
+	///      做 STL 内/外判定，保留与 locationInMesh 同侧者。
+	///   4) 跨 base-cell 的相邻面如果两侧 level 不同（差恰为 1）：粗一侧的 sub-cell 把
+	///      该面切成 2x2 的 4 个 sub-quad（用细一侧已经产生的中点/中心 Steiner 点），
+	///      coarse 侧 sub-cell 变成 9-面 多面体。
+	///   5) 把全局点表、faces、owner/neighbour、patch 表直接写出 polyMesh 目录。
+	///
+	/// 假设：单 hex 块；最高 level 与 buffer 之后相邻 level 差为 1；nCellsBetweenLevels >= 1。
 	bool run(
 		const XFoam_BlockMesh& bg,
 		const XFoam_TriSurface& stl,
-		XFoam_AutoPtr<XFoam_PolyMesh>& outPolyMesh,
+		const XFoam_FileName& outPolyMeshDir,
 		Stats& stats) const;
 
 private:
