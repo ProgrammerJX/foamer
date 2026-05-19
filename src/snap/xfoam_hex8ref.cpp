@@ -152,8 +152,16 @@ void XFoam_Hex8Ref::refineByPredicate(XFoam_Label targetLevel, const LeafPredica
 
 void XFoam_Hex8Ref::balance21()
 {
-	// 反复 pass：每轮重建 leafMap_，遍历当前所有 leaves，查 6 个 face 上是否存在比自己
-	// 更细 (level > self.level + 1) 的邻居 leaf；找到就 subdivide 自己。直到一整轮无变化。
+	// 反复 pass：每轮重建 leafMap_，遍历当前所有 leaves，对每个 face 用 resolveFaceNeighbor
+	// (O(1) 哈希) 查 finer 邻居；只要在 L+1 finer 的 4 个子位置上有任意一个槽位是 -1（=
+	// 那里实际占着 L+2 或更深 leaf，因为更深 leaf 不会出现在 L+1 哈希里），就说明 2:1
+	// balance 被破坏 → subdivide 自己一级。
+	//
+	// 旧实现是探 lc ∈ [L+2..cap] × factor² 个 hash key，cap=8 时 single face 单次探针
+	// 高达 256² = 65536 次，N=183K 时 balance21 自己花 200 秒。新实现每 face 1 次 hash
+	// resolve（resolveFaceNeighbor 内部最多 cap+4 次 lookup），整轮 O(N) 而非 O(N × 4^cap)。
+	//
+	// 收敛性：每一轮如果发现 delta > 1 就升一级。最差情况 cap+2 轮就稳定（O(N) → O(N × cap)）。
 	XFoam_Label iter = 0;
 	bool anySubdivided = true;
 	while (anySubdivided && iter < (levelCap_ + 2))
@@ -166,43 +174,34 @@ void XFoam_Hex8Ref::balance21()
 			const Leaf& l = leaves_[i];
 			if (l.level >= levelCap_) continue;
 
-			XFoam_Label maxNbr = -1;
-			for (int d = 0; d < 6; ++d)
+			bool needSubdivide = false;
+			for (int d = 0; d < 6 && !needSubdivide; ++d)
 			{
-				XFoam_Label aiN, ajN, akN, nsi, nsj, nsk;
-				if (!stepNeighborAtSameLevel(l, d, aiN, ajN, akN, nsi, nsj, nsk)) continue;
-
-				// 从最细 level 倒着试；只要找到 1 个 level > l.level + 1 的邻居就够。
-				for (XFoam_Label lc = l.level + 2; lc <= levelCap_; ++lc)
+				const FaceNbr nbr = resolveFaceNeighbor(l, d);
+				// 两种 finer-than-L+1 触发条件：
+				//   1) kind=Finer 但有某个 fineLeafIdx[q]=-1
+				//      → 那个 sub-cell 不是 L+1 leaf 而是被进一步细分到 L+2/L+3 → 与 self
+				//        (L) 之差 ≥ 2。
+				//   2) kind=None（4 个 L+1 子位置全部不存在但邻居 base-cell 存在）
+				//      → 邻居所有 4 个 L+1 sub-slot 都被进一步细分到 L+2 以下，差 ≥ 2。
+				if (nbr.kind == FaceNbrKind::Finer)
 				{
-					const XFoam_Label factor = static_cast<XFoam_Label>(1) << (lc - l.level);
-					const int axD = kFaceAxes[d][0];
-					const int axA = kFaceAxes[d][1];
-					const int axB = kFaceAxes[d][2];
-					const XFoam_Label offD = (d % 2 == 0) ? (factor - 1) : 0;
-					const XFoam_Label nsArr[3] = {nsi, nsj, nsk};
-					bool found = false;
-					for (XFoam_Label a = 0; a < factor && !found; ++a)
+					for (int q = 0; q < 4; ++q)
 					{
-						for (XFoam_Label b = 0; b < factor && !found; ++b)
+						if (nbr.fineLeafIdx[q] == -1)
 						{
-							XFoam_Label fp[3];
-							fp[axD] = nsArr[axD] * factor + offD;
-							fp[axA] = nsArr[axA] * factor + a;
-							fp[axB] = nsArr[axB] * factor + b;
-							const uint64_t key = encodeLeafKey(aiN, ajN, akN, lc, fp[0], fp[1], fp[2]);
-							if (leafMap_.find(key) != leafMap_.end())
-							{
-								found = true;
-								if (lc > maxNbr) maxNbr = lc;
-							}
+							needSubdivide = true;
+							break;
 						}
 					}
-					if (found) break;
+				}
+				else if (nbr.kind == FaceNbrKind::None)
+				{
+					needSubdivide = true;
 				}
 			}
 
-			if (maxNbr > l.level + 1)
+			if (needSubdivide)
 			{
 				subdivide(static_cast<XFoam_Label>(i));
 				anySubdivided = true;

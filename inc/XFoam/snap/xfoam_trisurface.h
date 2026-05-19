@@ -6,10 +6,14 @@
 //
 // 对标 OpenFOAM 的 Foam::triSurface（src/triSurface），但极度简化：
 //   - 仅 ascii 与 binary STL；不读 FreeSurfer/nas/ftr 等
-//   - 不建 octree / 不建 BVH，所有查询走线性扫描（小 STL 够用）
+//   - 自带 中位数分割 BVH（AABB tree，叶 4 个三角面），所有空间查询都走 BVH：
+//       boxIntersects   ~ O(log N + k)
+//       contains/rayCountPlusX ~ O(log N + k)
+//       distance/closestPoint  ~ O(log N + 极少 leaf)
+//     （k = 与查询 bbox 真正相交的三角面数）
 //   - 不区分 region；整个表面就一个 patch
 //   - 法向量直接取自 STL header 中的 facet normal；不重算
-// 适合教学/演示规模（几千三角面），不适合工业级网格。
+// 适合教学/演示规模（几千～几十万三角面，BVH 后查询时间近似常数）。
 
 #include "XFoam/utilities/xfoam_boundbox.h"
 #include "XFoam/utilities/xfoam_common.h"
@@ -65,12 +69,54 @@ private:
 	std::vector<Triangle> tris_;
 	XFoam_BoundBox bounds_;
 
+	// ----- BVH（AABB tree） -----
+	// 每个 node 存子 bbox + 子节点索引（internal）或三角面区间（leaf）。整棵树
+	// 用扁平 std::vector 存，索引而非指针，避免重新 alloc 时被踩坏。triOrder_
+	// 是三角面的下标置换：每个 leaf 的 [firstTri, firstTri + triCount) 范围内的
+	// triOrder_[i] 就是该 leaf 包含的三角面。
+	//
+	// 不暴露在公有 API；构造在 read*() 末尾自动 build，外部只看到加速过的查询。
+	struct BvhNode
+	{
+		XFoam_BoundBox bbox;
+		int leftIdx;    ///< internal: 左子下标 (>=0)；leaf: -1
+		int rightIdx;   ///< internal: 右子下标 (>=0)；leaf: -1
+		int firstTri;   ///< leaf: triOrder_ 起点；internal: -1
+		int triCount;   ///< leaf: 包含三角面数 (>0)；internal: 0
+
+		BvhNode() : leftIdx(-1), rightIdx(-1), firstTri(-1), triCount(0) {}
+	};
+
+	std::vector<BvhNode> bvhNodes_;
+	std::vector<XFoam_Label> bvhOrder_;
+	static constexpr int kBvhLeafLimit = 4; ///< leaf 最多承载的三角面数（小常数 → 查询常数更小）
+
 	void rebuildBounds();
 	void addTriangle(
 		const XFoam_Vector3D& a,
 		const XFoam_Vector3D& b,
 		const XFoam_Vector3D& c,
 		const XFoam_Vector3D* explicitNormal);
+
+	void buildBvh();
+	/// 自顶向下递归建树；返回当前节点在 bvhNodes_ 里的下标。
+	/// 调用前必须保证 bvhNodes_ 已 reserve 到 ≤ 2N，否则递归过程的 push_back 触发
+	/// realloc 不会让索引失效（我们用 int 索引而非引用），但仍会反复 copy node。
+	int buildBvhRecursive(int lo, int hi);
+
+	/// p 到 AABB 的最短距离平方；p 在盒内时为 0。
+	static XFoam_Scalar bboxMinDistSqr(const XFoam_Vector3D& p, const XFoam_BoundBox& bb);
+
+	// 下面三个是带 BVH 剪枝的查询；tris_ 为空 / BVH 未建时回退线性扫描（addTriangle 后
+	// 没立刻 rebuild）。
+	void bvhClosestPoint(
+		const XFoam_Vector3D& p,
+		XFoam_Scalar& bestD2,
+		XFoam_Vector3D& bestQ,
+		XFoam_Label& bestTri,
+		int nodeIdx) const;
+	int  bvhRayCountPlusX(const XFoam_Vector3D& p, int nodeIdx) const;
+	bool bvhBoxIntersects(const XFoam_BoundBox& q, int nodeIdx) const;
 };
 
 #endif

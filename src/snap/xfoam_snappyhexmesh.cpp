@@ -1033,7 +1033,6 @@ bool XFoam_SnappyHexMesh::run(
 			}
 		}
 	}
-
 	// ----- 9. 装配 polyMesh 三大列表 + patch 表 -----
 	std::vector<std::vector<int>> facesOut;
 	std::vector<int> ownerOut, nbrOut;
