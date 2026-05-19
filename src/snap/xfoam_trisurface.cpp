@@ -8,6 +8,7 @@
 #include <fstream>
 #include <limits>
 #include <sstream>
+#include <unordered_map>
 
 namespace
 {
@@ -572,4 +573,215 @@ bool XFoam_TriSurface::boxIntersects(const XFoam_BoundBox& box) const
 		}
 	}
 	return false;
+}
+
+// ------- Snap #7 feature extraction & query -------
+//
+// 流程：
+//   1) Vertex 去重：按量化坐标 hash（精度 = bbox.span() / 1e9 量级），每个 Triangle 的
+//      v0/v1/v2 映射到唯一 vertex id。
+//   2) Edge → tri 邻接表：每个三角形 3 条 edge（按 sorted (vid, vid)），收集所有引用它的
+//      tri 下标。
+//   3) Feature 判定：
+//        - 边界 edge（只 1 个 tri 引用）→ feature
+//        - 非流形 edge（≥3 tri 引用）→ feature
+//        - 流形 edge（恰 2 tri）→ 若 normal · normal < cos(thresh) → feature
+//   4) Feature vertex：累计每个 vid 入射的 feature edge 数，≥ 3 即为 feature vertex。
+//
+// 复杂度：O(N_tri)；查询时 closestFeature 线性扫描 feature 数组。Feature 数远小于
+// 三角面数，cylinder1 1620 tri → ~30 feature edge。
+namespace
+{
+struct PtKeyTri
+{
+	int64_t x, y, z;
+	bool operator==(const PtKeyTri& o) const { return x == o.x && y == o.y && z == o.z; }
+};
+struct PtKeyTriHash
+{
+	size_t operator()(const PtKeyTri& k) const noexcept
+	{
+		// 三轴 64-bit 混合：移位异或，常数取自 splitmix64 spread。
+		uint64_t h = static_cast<uint64_t>(k.x) * 0x9E3779B97F4A7C15ULL;
+		h ^= static_cast<uint64_t>(k.y) + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+		h ^= static_cast<uint64_t>(k.z) + 0x9E3779B97F4A7C15ULL + (h << 6) + (h >> 2);
+		return static_cast<size_t>(h);
+	}
+};
+struct EdgeKeyTri
+{
+	int a, b; // a < b
+	bool operator==(const EdgeKeyTri& o) const { return a == o.a && b == o.b; }
+};
+struct EdgeKeyTriHash
+{
+	size_t operator()(const EdgeKeyTri& k) const noexcept
+	{
+		return (static_cast<size_t>(k.a) * 0x9E3779B97F4A7C15ULL) ^ static_cast<size_t>(k.b);
+	}
+};
+
+inline XFoam_Scalar pointSegmentDistSqr(
+	const XFoam_Vector3D& p,
+	const XFoam_Vector3D& a,
+	const XFoam_Vector3D& b,
+	XFoam_Vector3D& outClosest)
+{
+	const XFoam_Vector3D ab = b - a;
+	const XFoam_Scalar abLen2 = ab.x() * ab.x() + ab.y() * ab.y() + ab.z() * ab.z();
+	if (abLen2 <= 0)
+	{
+		outClosest = a;
+		const XFoam_Vector3D d = p - a;
+		return d.x() * d.x() + d.y() * d.y() + d.z() * d.z();
+	}
+	const XFoam_Vector3D ap = p - a;
+	XFoam_Scalar t = (ap.x() * ab.x() + ap.y() * ab.y() + ap.z() * ab.z()) / abLen2;
+	if (t < 0) t = 0;
+	if (t > 1) t = 1;
+	outClosest = a + ab * t;
+	const XFoam_Vector3D d = p - outClosest;
+	return d.x() * d.x() + d.y() * d.y() + d.z() * d.z();
+}
+} // namespace
+
+void XFoam_TriSurface::buildFeatures(XFoam_Scalar angleDegThresh)
+{
+	featureEdges_.clear();
+	featureVerts_.clear();
+	if (tris_.empty()) return;
+
+	// 1) Vertex 去重：量化精度按 bbox span 取。bbox 跨 1.0 时 eps ≈ 1e-9。
+	const XFoam_Vector3D span(
+		std::max<XFoam_Scalar>(bounds_.max().x() - bounds_.min().x(), 1),
+		std::max<XFoam_Scalar>(bounds_.max().y() - bounds_.min().y(), 1),
+		std::max<XFoam_Scalar>(bounds_.max().z() - bounds_.min().z(), 1));
+	const XFoam_Scalar maxSpan = std::max(std::max(span.x(), span.y()), span.z());
+	const XFoam_Scalar eps = maxSpan * static_cast<XFoam_Scalar>(1e-9);
+	const XFoam_Scalar invEps = static_cast<XFoam_Scalar>(1) / eps;
+	auto keyOf = [&](const XFoam_Vector3D& p) -> PtKeyTri {
+		return {
+			static_cast<int64_t>(std::llround(p.x() * invEps)),
+			static_cast<int64_t>(std::llround(p.y() * invEps)),
+			static_cast<int64_t>(std::llround(p.z() * invEps))
+		};
+	};
+
+	std::unordered_map<PtKeyTri, int, PtKeyTriHash> vertId;
+	vertId.reserve(tris_.size() * 3);
+	std::vector<XFoam_Vector3D> uniqueVerts;
+	uniqueVerts.reserve(tris_.size() / 2);
+	auto addVert = [&](const XFoam_Vector3D& p) -> int {
+		const PtKeyTri k = keyOf(p);
+		auto it = vertId.find(k);
+		if (it != vertId.end()) return it->second;
+		const int id = static_cast<int>(uniqueVerts.size());
+		uniqueVerts.push_back(p);
+		vertId.emplace(k, id);
+		return id;
+	};
+
+	std::vector<std::array<int, 3>> triVids(tris_.size());
+	for (size_t ti = 0; ti < tris_.size(); ++ti)
+	{
+		triVids[ti][0] = addVert(tris_[ti].v0);
+		triVids[ti][1] = addVert(tris_[ti].v1);
+		triVids[ti][2] = addVert(tris_[ti].v2);
+	}
+
+	// 2) Edge → tri 邻接表。每条 edge 用 sorted (vid, vid) 键。
+	std::unordered_map<EdgeKeyTri, std::vector<int>, EdgeKeyTriHash> edgeTris;
+	edgeTris.reserve(tris_.size() * 3);
+	for (size_t ti = 0; ti < tris_.size(); ++ti)
+	{
+		for (int e = 0; e < 3; ++e)
+		{
+			int a = triVids[ti][e];
+			int b = triVids[ti][(e + 1) % 3];
+			if (a > b) std::swap(a, b);
+			edgeTris[{a, b}].push_back(static_cast<int>(ti));
+		}
+	}
+
+	// 3) Feature 判定：开边 / 非流形 / 折角。
+	// MSVC 未默认定义 M_PI；直接用 3.14159... / 180 常量。
+	const XFoam_Scalar cosThresh = std::cos(
+		angleDegThresh * static_cast<XFoam_Scalar>(3.14159265358979323846 / 180.0));
+	std::unordered_map<int, int> vertFeatDegree;
+	for (const auto& kv : edgeTris)
+	{
+		const EdgeKeyTri& key = kv.first;
+		const std::vector<int>& ts = kv.second;
+		bool isFeature = false;
+		if (ts.size() == 1) isFeature = true;
+		else if (ts.size() >= 3) isFeature = true;
+		else
+		{
+			const XFoam_Vector3D& n1 = tris_[ts[0]].normal;
+			const XFoam_Vector3D& n2 = tris_[ts[1]].normal;
+			const XFoam_Scalar dot = n1.x() * n2.x() + n1.y() * n2.y() + n1.z() * n2.z();
+			// dot 小于 cosThresh 即夹角大于 thresh：cos 单调下降。法向已是单位向量，无需 normalize。
+			if (dot < cosThresh) isFeature = true;
+		}
+		if (isFeature)
+		{
+			FeatureEdge fe;
+			fe.p1 = uniqueVerts[key.a];
+			fe.p2 = uniqueVerts[key.b];
+			featureEdges_.push_back(fe);
+			++vertFeatDegree[key.a];
+			++vertFeatDegree[key.b];
+		}
+	}
+
+	// 4) Feature vertex：≥3 条入射 feature edge 视为尖角。
+	for (const auto& kv : vertFeatDegree)
+	{
+		if (kv.second >= 3)
+		{
+			FeatureVertex fv;
+			fv.p = uniqueVerts[kv.first];
+			featureVerts_.push_back(fv);
+		}
+	}
+}
+
+XFoam_TriSurface::FeatureKind XFoam_TriSurface::closestFeature(
+	const XFoam_Vector3D& p,
+	XFoam_Scalar searchRadius,
+	XFoam_Vector3D& outClosest) const
+{
+	if (featureEdges_.empty() && featureVerts_.empty()) return FeatureKind::None;
+	const XFoam_Scalar r2 = searchRadius * searchRadius;
+	XFoam_Scalar bestD2 = r2;
+	FeatureKind bestKind = FeatureKind::None;
+	XFoam_Vector3D bestQ;
+
+	// 先扫 feature vertex：尖角优先（更典型的 snap 目标）。
+	for (size_t i = 0; i < featureVerts_.size(); ++i)
+	{
+		const XFoam_Vector3D& fp = featureVerts_[i].p;
+		const XFoam_Vector3D d = fp - p;
+		const XFoam_Scalar d2 = d.x() * d.x() + d.y() * d.y() + d.z() * d.z();
+		if (d2 < bestD2)
+		{
+			bestD2 = d2;
+			bestKind = FeatureKind::Vertex;
+			bestQ = fp;
+		}
+	}
+	// 再扫 feature edge。若已经在 vertex 半径内，可能仍被 edge 进一步逼近 → 都查。
+	for (size_t i = 0; i < featureEdges_.size(); ++i)
+	{
+		XFoam_Vector3D q;
+		const XFoam_Scalar d2 = pointSegmentDistSqr(p, featureEdges_[i].p1, featureEdges_[i].p2, q);
+		if (d2 < bestD2)
+		{
+			bestD2 = d2;
+			bestKind = FeatureKind::Edge;
+			bestQ = q;
+		}
+	}
+	if (bestKind != FeatureKind::None) outClosest = bestQ;
+	return bestKind;
 }

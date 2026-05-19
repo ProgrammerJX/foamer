@@ -321,6 +321,71 @@ TEST_CASE("snap: motionSmoother (nSmoothInternal=3) 向内传播 patch 位移，
 	CHECK(statsB.minCellVolumeInitial > 0);
 }
 
+TEST_CASE("snap: feature extraction on cylinder1.stl finds cap-to-side edges")
+{
+	XFoam_TriSurface stl;
+	REQUIRE(stl.read(XFoamTests_cylinderStl(__FILE__)));
+
+	// Cylinder1 由若干平面三角面拼成（盒子部分），cap-to-side 接缝的法向夹角应远大于
+	// 30°；buildFeatures(30) 必须能挑出 ≥1 条 feature edge。同时 vertex 数 ≥ 0。
+	stl.buildFeatures(30);
+	CHECK(stl.nFeatureEdges() > 0);
+
+	// 任何 feature edge 端点本身一定是 feature edge 的一个 endpoint；
+	// 用其中一个 vertex 做 query：radius 大到能覆盖到它，应返回 Vertex 或 Edge。
+	const XFoam_Vector3D probe(0, 0, 0);
+	XFoam_Vector3D out;
+	const auto kind = stl.closestFeature(probe, 5.0, out);
+	CHECK(kind != XFoam_TriSurface::FeatureKind::None);
+}
+
+TEST_CASE("snap: implicitFeatureSnap=true 把 boundary 点真正拉到 feature 上")
+{
+	namespace fs = boost::filesystem;
+	const std::string snappyDictText =
+		"FoamFile { version 2.0; format ascii; class dictionary; object snappyHexMeshDict; }\n"
+		"castellatedMesh true; snap true; addLayers false;\n"
+		"geometry { cylinder1.stl { type triSurfaceMesh; name cylinder1; } }\n"
+		"castellatedMeshControls {\n"
+		"  maxLocalCells 200000; maxGlobalCells 400000; minRefinementCells 0;\n"
+		"  nCellsBetweenLevels 1; resolveFeatureAngle 30;\n"
+		"  refinementSurfaces { cylinder1 { level (2 2); } }\n"
+		"  locationInMesh (0.9 0.9 0.9);\n"
+		"  allowFreeStandingZoneFaces true;\n"
+		"}\n"
+		"snapControls { nSmoothPatch 0; nSmoothInternal 0; tolerance 2.0;\n"
+		"  nSolveIter 30; nRelaxIter 0; nFeatureSnapIter 10; implicitFeatureSnap true; }\n"
+		"addLayersControls { relativeSizes true; expansionRatio 1.2; finalLayerThickness 0.3;\n"
+		"  minThickness 0.1; nGrow 0; featureAngle 60; }\n";
+	const fs::path tmp = XFoamTests_tmpDir(__FILE__) / "tsnappy_smoke_feature";
+	fs::create_directories(tmp);
+	const fs::path dictPath = tmp / "snappyHexMeshDict";
+	{
+		std::ofstream o(dictPath.string().c_str());
+		o << snappyDictText;
+	}
+	const XFoam_IODictionary sIO(XFoam_systemDictIO(XFoam_FileName(dictPath.generic_string())));
+	const XFoam_SnappyHexMesh snappy(sIO);
+	CHECK(snappy.snapParams().implicitFeatureSnap == true);
+
+	const XFoam_IODictionary bgIO(XFoam_systemDictIO(XFoamTests_blockCyl(__FILE__)));
+	XFoam_BlockMesh bg(bgIO);
+
+	XFoam_TriSurface stl;
+	REQUIRE(stl.read(XFoamTests_cylinderStl(__FILE__)));
+	stl.buildFeatures(snappy.refineParams().resolveFeatureAngle);
+	REQUIRE(stl.nFeatureEdges() > 0);
+
+	const fs::path outDir = tmp / "out";
+	fs::remove_all(outDir);
+	XFoam_SnappyHexMesh::Stats stats;
+	REQUIRE(snappy.run(bg, stl, XFoam_FileName(outDir.generic_string()), stats));
+
+	// 启用了 implicitFeatureSnap 且 STL 有 feature edge → 至少应该有 1 个 boundary point
+	// 被 snap 到了 feature 上（cylinder1 的 cap 边对 L=2 cell 来说几乎总能命中）。
+	CHECK((stats.nFeatureEdgeSnaps + stats.nFeatureVertexSnaps) > 0);
+}
+
 TEST_CASE("snap: validate-and-relax 在合成 bad cell 情景下能恢复体积")
 {
 	// 直接调用一份很小的 mesh：1×1×1 背景 + 一个把 boundary 点拉得离谱的 STL，

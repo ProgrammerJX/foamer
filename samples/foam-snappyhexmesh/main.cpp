@@ -153,11 +153,23 @@ int main(int argc, char** argv)
 				std::cerr << "failed to read STL: " << stlPath.string() << "\n";
 				return 1;
 			}
+			// Snap #7：dict 打开 implicitFeatureSnap 时帮 STL 抽一次 feature。
+			// snappy.run 自身不持有 STL，且 STL 引用是 const，必须由 caller 完成 build。
+			if (snappy.snapParams().implicitFeatureSnap)
+			{
+				stlStorage[si].buildFeatures(snappy.refineParams().resolveFeatureAngle);
+			}
 			stlPtrs[si] = &stlStorage[si];
 			std::cout << "       " << stlStorage[si].size() << " tris, bbox ("
 			          << stlStorage[si].bounds().min().x() << ',' << stlStorage[si].bounds().min().y() << ',' << stlStorage[si].bounds().min().z() << ") .. ("
 			          << stlStorage[si].bounds().max().x() << ',' << stlStorage[si].bounds().max().y() << ',' << stlStorage[si].bounds().max().z() << ")"
-			          << "  level=(" << specs[si].minLevel << ' ' << specs[si].maxLevel << ")\n";
+			          << "  level=(" << specs[si].minLevel << ' ' << specs[si].maxLevel << ")";
+			if (snappy.snapParams().implicitFeatureSnap)
+			{
+				std::cout << "  features=(" << stlStorage[si].nFeatureEdges()
+				          << " edges, " << stlStorage[si].nFeatureVertices() << " verts)";
+			}
+			std::cout << "\n";
 		}
 
 		std::cout << "Refinement level   : " << snappy.globalRefinementLevel()
@@ -192,6 +204,12 @@ int main(int argc, char** argv)
 		{
 			std::cout << "Smoothed internal  : " << stats.nSmoothedInternalPoints
 			          << "  (max move " << stats.maxInternalSmoothMove << ")\n";
+		}
+		if (stats.nFeatureEdgeSnaps > 0 || stats.nFeatureVertexSnaps > 0)
+		{
+			std::cout << "Feature snaps      : "
+			          << stats.nFeatureVertexSnaps << " vertex + "
+			          << stats.nFeatureEdgeSnaps << " edge\n";
 		}
 		if (stats.nBadCellsInitial > 0 || stats.nRelaxIterationsUsed > 0)
 		{

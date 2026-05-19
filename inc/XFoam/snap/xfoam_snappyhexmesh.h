@@ -65,6 +65,8 @@ public:
 		XFoam_Scalar maxSnapDistance = 0;
 		XFoam_Label nSmoothedInternalPoints = 0; ///< motionSmoother 移动了的内部点数（不含 patch 点）
 		XFoam_Scalar maxInternalSmoothMove = 0;  ///< motionSmoother 对内部点造成的最大移动距离
+		XFoam_Label nFeatureEdgeSnaps = 0;       ///< Snap #7 替换为 feature edge 投影的 boundary 点数
+		XFoam_Label nFeatureVertexSnaps = 0;     ///< Snap #7 替换为 feature vertex 的 boundary 点数
 
 		// Snap #6 validate-and-relax：捕捉 snap 之后还残留的负体积/退化 cell。relax 没生效时
 		// 这些字段保持 0。

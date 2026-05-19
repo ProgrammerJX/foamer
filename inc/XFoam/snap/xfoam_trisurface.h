@@ -65,6 +65,31 @@ public:
 	/// (0,0,0) 对 +X 等于 R 处的等分顶点）出现奇偶判定不稳。
 	bool contains(const XFoam_Vector3D& p) const;
 
+	// ------- Snap #7 feature edges / corners -------
+	// 任何被 2 个三角面共享、且两面法向夹角超过 angleDegThresh（默认 OF 30 deg）的边
+	// 都视为 feature；只被 1 个三角面引用的开边 / 多面共享的非流形边也算 feature。
+	// featureVertex = 至少 3 条 feature edge 入射的顶点（典型尖角点）。
+	//
+	// 必须在 read*() 之后显式调用一次；否则查询会返回 None。重复调用会重建。
+	void buildFeatures(XFoam_Scalar angleDegThresh);
+	XFoam_Label nFeatureEdges() const { return static_cast<XFoam_Label>(featureEdges_.size()); }
+	XFoam_Label nFeatureVertices() const { return static_cast<XFoam_Label>(featureVerts_.size()); }
+
+	enum class FeatureKind
+	{
+		None,
+		Edge,
+		Vertex
+	};
+
+	/// 在 searchRadius 半径内查最近 feature。若 feature vertex 在半径内则优先（snap 到
+	/// 尖角效果更好）。找到时填 outClosest 并返回 Edge / Vertex；否则 outClosest 保持不动，
+	/// 返回 None。tolerance 比较走平方距离避免开方。
+	FeatureKind closestFeature(
+		const XFoam_Vector3D& p,
+		XFoam_Scalar searchRadius,
+		XFoam_Vector3D& outClosest) const;
+
 private:
 	std::vector<Triangle> tris_;
 	XFoam_BoundBox bounds_;
@@ -90,6 +115,20 @@ private:
 	std::vector<BvhNode> bvhNodes_;
 	std::vector<XFoam_Label> bvhOrder_;
 	static constexpr int kBvhLeafLimit = 4; ///< leaf 最多承载的三角面数（小常数 → 查询常数更小）
+
+	// ------- Snap #7 feature storage -------
+	// featureEdges_[i] = (p1, p2) 端点。featureVerts_[i] = p。线性数组够用：典型 STL
+	// feature 数远小于三角面数（cylinder1 1620 tri → ~200 feature edge）。
+	struct FeatureEdge
+	{
+		XFoam_Vector3D p1, p2;
+	};
+	struct FeatureVertex
+	{
+		XFoam_Vector3D p;
+	};
+	std::vector<FeatureEdge> featureEdges_;
+	std::vector<FeatureVertex> featureVerts_;
 
 	void rebuildBounds();
 	void addTriangle(

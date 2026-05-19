@@ -744,6 +744,9 @@ bool XFoam_SnappyHexMesh::run(
 
 	// ----- 9. 给所有 block 的所有 leaf 生成 8 个 corner 点 -----
 	// 跨 block 的共享面顶点位置一致 → addPoint 自然 dedup。
+	// 同时为 Snap #7 维护 ptCellSize_：每个 point 所属 leaf 的最小轴长（多个 leaf 共享时取
+	// 最细那个），后续 feature snap 用 0.5 * ptCellSize 作为搜索半径。
+	std::vector<XFoam_Scalar> ptCellSize;
 	for (XFoam_Label bi = 0; bi < nBlocks; ++bi)
 	{
 		BlockData& B = blocks[static_cast<size_t>(bi)];
@@ -751,7 +754,24 @@ bool XFoam_SnappyHexMesh::run(
 		for (Leaf& l : lvs)
 		{
 			XFoam_Vector3D c[8]; leafCornersWorldB(B, l, c);
-			for (int oc = 0; oc < 8; ++oc) l.corner[oc] = addPoint(c[oc]);
+			// 最小轴长：(c1-c0).x, (c3-c0).y, (c4-c0).z 的最小绝对值
+			const XFoam_Scalar dx = std::abs(c[1].x() - c[0].x());
+			const XFoam_Scalar dy = std::abs(c[3].y() - c[0].y());
+			const XFoam_Scalar dz = std::abs(c[4].z() - c[0].z());
+			const XFoam_Scalar leafMin = std::min(dx, std::min(dy, dz));
+			for (int oc = 0; oc < 8; ++oc)
+			{
+				const int pid = addPoint(c[oc]);
+				l.corner[oc] = pid;
+				if (pid >= static_cast<int>(ptCellSize.size()))
+				{
+					ptCellSize.resize(static_cast<size_t>(pid) + 1, std::numeric_limits<XFoam_Scalar>::max());
+				}
+				if (leafMin < ptCellSize[static_cast<size_t>(pid)])
+				{
+					ptCellSize[static_cast<size_t>(pid)] = leafMin;
+				}
+			}
 		}
 	}
 
@@ -1024,9 +1044,20 @@ bool XFoam_SnappyHexMesh::run(
 		const XFoam_Label nRelaxIt  = std::max<XFoam_Label>(0, snap_.nRelaxIter);
 		std::vector<XFoam_Vector3D> origPts = pts;
 
+		// Snap #7 feature snap：如果 dict 打开了 implicitFeatureSnap 且 STL 上抽过 feature，
+		// 则每个 boundary pt 先做 surface snap 拿 qSurf，再在 snap_.tolerance * ptCellSize
+		// 半径内查最近 feature（OF 习惯 tolerance=2.0 → 半径为 2 倍局部 cell size，足够覆盖
+		// L+1 邻居）。两种合并规则（closestFeature 内部已用 radius 做了过滤）：
+		//   * feature Vertex 在半径内 → snap 到 vertex（尖角第一优先）
+		//   * feature Edge   在半径内 → snap 到 edge 投影点（cylinder cap 棱由此变锋利）
+		//   * 都不在半径内 → 用 qSurf
+		const bool doFeatureSnap = snap_.implicitFeatureSnap;
+		const XFoam_Scalar featureRadiusFactor = std::max<XFoam_Scalar>(snap_.tolerance, 1);
 		for (XFoam_Label si = 0; si < nSurf; ++si)
 		{
 			if (!stls[si] || stls[si]->empty()) continue;
+			const bool hasFeatures = doFeatureSnap
+				&& (stls[si]->nFeatureEdges() > 0 || stls[si]->nFeatureVertices() > 0);
 			for (int fi : stlIdxBySurf[static_cast<size_t>(si)])
 			{
 				const FInfo& f = finalFaces[fi];
@@ -1036,6 +1067,24 @@ bool XFoam_SnappyHexMesh::run(
 					snapped[v] = 1;
 					XFoam_Vector3D closest, normal;
 					stls[si]->closestPointAndNormal(pts[v], closest, normal);
+
+					if (hasFeatures && v < static_cast<int>(ptCellSize.size()))
+					{
+						const XFoam_Scalar radius = featureRadiusFactor * ptCellSize[v];
+						XFoam_Vector3D fq;
+						const auto kind = stls[si]->closestFeature(pts[v], radius, fq);
+						if (kind == XFoam_TriSurface::FeatureKind::Vertex)
+						{
+							closest = fq;
+							++stats.nFeatureVertexSnaps;
+						}
+						else if (kind == XFoam_TriSurface::FeatureKind::Edge)
+						{
+							closest = fq;
+							++stats.nFeatureEdgeSnaps;
+						}
+					}
+
 					const XFoam_Scalar d = (closest - pts[v]).mag();
 					if (d > stats.maxSnapDistance) stats.maxSnapDistance = d;
 					pts[v] = closest;
