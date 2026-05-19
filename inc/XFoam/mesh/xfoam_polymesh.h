@@ -129,6 +129,18 @@ public:
 
 	void removeFiles() const;
 	bool write(const bool doWrite = true) const;
+
+	/// 写出标准 OpenFOAM polyMesh 目录（points/faces/owner/neighbour/boundary）。
+	/// 已有目录则覆盖；未存在则创建（含父目录）。
+	/// 对标 OF: src/OpenFOAM/meshes/polyMesh/polyMeshIO.C（polyMesh::writeObject 子集）；
+	/// 仅 ascii 格式；无 IOobject/objectRegistry / time instance / binary path。
+	/// \param polyMeshDir   目标目录（典型 <case>/constant/polyMesh）。
+	/// \param patchTypes    可选；若大小等于 boundary().size()，覆盖各 patch 的 type 字段
+	///                      （否则全部写成 "patch"）。BlockMesh::patchTypes() 直接喂进来即可。
+	/// \return true 表示 5 个文件全部写成功。
+	bool writePolyMeshDir(
+		const XFoam_FileName& polyMeshDir,
+		const XFoam_WordList& patchTypes = XFoam_WordList()) const;
 	/// \brief 写入有限元模型到文件
 	/// \param fileName 默认输出bdf文件
 	/// \param doWrite 是否写入文件

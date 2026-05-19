@@ -58,6 +58,13 @@ class XFoam_API XFoam_BlockMesh
 
 	mutable XFoam_FaceListList patches_;
 
+	// 由 createPatches() 与 patches_ 一起填充，避免上层调用 patchNames()/patchDicts() 时再
+	// 解析一次 boundary。patchNames_ 在过去由 topology().boundary().names() 取，
+	// 那只反映单 hex 占位拓扑的边界，多 block dict 下并不可靠；
+	// 改成从 dict 直接缓存，多 block 下也是正确的。
+	mutable XFoam_WordList patchNames_;
+	mutable XFoam_WordList patchTypes_;
+
 	template<class Source>
 	void checkPatchLabels(
 		const Source& source,
@@ -171,6 +178,10 @@ public:
 	XFoam_PtrListDictionary<XFoam_Dictionary> patchDicts() const;
 
 	XFoam_WordList patchNames() const;
+
+	/// 与 patches() 一一对应的 patch 类型（默认 "patch"）。
+	/// 由 createPatches() 在解析 boundary 字典时缓存，无需重复解析。
+	const XFoam_WordList& patchTypes() const;
 
 	XFoam_Label numZonedBlocks() const;
 

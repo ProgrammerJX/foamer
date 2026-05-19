@@ -1,8 +1,13 @@
 #include "XFoam/mesh/xfoam_polymesh.h"
 #include "XFoam/utilities/xfoam_dictionary.h"
 #include "XFoam/utilities/xfoam_fem.h"
+#include <boost/filesystem.hpp>
 #include <algorithm>
+#include <fstream>
+#include <iomanip>
+#include <ios>
 #include <map>
+#include <ostream>
 #include <utility>
 #include <vector>
 
@@ -951,8 +956,176 @@ XFoam_PolyMesh::~XFoam_PolyMesh() = default;
 
 void XFoam_PolyMesh::removeFiles() const {}
 
+namespace
+{
+// 移植参考: OpenFOAM src/OpenFOAM/db/IOstreams/IOstreams/IOstream.C 的 FoamFile header
+// 输出格式。XFoam 没移植 IOobject 的 instance/local 路径系统，这里直接按 path 写盘。
+void XFoamWriteFoamFileHeader(
+	std::ostream& os,
+	const char* className,
+	const char* objectName,
+	const char* location,
+	const char* note = nullptr)
+{
+	os << "/*--------------------------------*- C++ -*----------------------------------*\\\n"
+	   << "| =========                 |                                                 |\n"
+	   << "| \\\\      /  F ield         | XFoam (myfoam blockMesh utility)               |\n"
+	   << "|  \\\\    /   O peration     |                                                 |\n"
+	   << "|   \\\\  /    A nd           |                                                 |\n"
+	   << "|    \\\\/     M anipulation  |                                                 |\n"
+	   << "\\*---------------------------------------------------------------------------*/\n";
+	os << "FoamFile\n{\n"
+	   << "    version     2.0;\n"
+	   << "    format      ascii;\n"
+	   << "    class       " << className << ";\n";
+	if (note && note[0])
+	{
+		os << "    note        \"" << note << "\";\n";
+	}
+	os << "    location    \"" << location << "\";\n"
+	   << "    object      " << objectName << ";\n"
+	   << "}\n"
+	   << "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //\n\n";
+}
+
+// 对标 OF 的 token::SPACE 缩进列表写法：一行一项，左缘 4 空格。
+void XFoamWritePoints(std::ostream& os, const XFoam_UList<XFoam_Vector3D>& pts)
+{
+	os << pts.size() << "\n(\n";
+	os << std::setprecision(15);
+	for (XFoam_Label i = 0; i < pts.size(); ++i)
+	{
+		const XFoam_Vector3D& p = pts[i];
+		os << "(" << p.x() << ' ' << p.y() << ' ' << p.z() << ")\n";
+	}
+	os << ")\n";
+}
+
+void XFoamWriteFaces(std::ostream& os, const XFoam_UList<XFoam_Face>& faces)
+{
+	os << faces.size() << "\n(\n";
+	for (XFoam_Label i = 0; i < faces.size(); ++i)
+	{
+		const XFoam_Face& f = faces[i];
+		os << f.size() << "(";
+		for (XFoam_Label k = 0; k < f.size(); ++k)
+		{
+			if (k) os << ' ';
+			os << f[k];
+		}
+		os << ")\n";
+	}
+	os << ")\n";
+}
+
+void XFoamWriteLabelList(std::ostream& os, const XFoam_UList<XFoam_Label>& v)
+{
+	os << v.size() << "\n(\n";
+	for (XFoam_Label i = 0; i < v.size(); ++i)
+	{
+		os << v[i] << "\n";
+	}
+	os << ")\n";
+}
+} // namespace
+
 bool XFoam_PolyMesh::write(const bool /*doWrite*/) const
 {
+	return true;
+}
+
+bool XFoam_PolyMesh::writePolyMeshDir(
+	const XFoam_FileName& polyMeshDir,
+	const XFoam_WordList& patchTypes) const
+{
+	namespace fs = boost::filesystem;
+	// XFoam_FileName 转 std::string 路径。XFoam_FileName 继承自 XFoam_String，
+	// 这里只走标准 boost 路径，避免假设 XFoam 的扩展 API。
+	const fs::path dir(static_cast<const std::string&>(static_cast<const XFoam_String&>(polyMeshDir)));
+	boost::system::error_code ec;
+	fs::create_directories(dir, ec);
+	if (ec)
+	{
+		return false;
+	}
+
+	const char* location = "constant/polyMesh";
+	const XFoam_Label nInt = nInternalFaces();
+	const XFoam_Label nFac = nFaces();
+	const XFoam_Label nCll = nCells();
+	const XFoam_Label nPnt = nPoints();
+
+	auto openFile = [&](const std::string& name) -> std::ofstream
+	{
+		// 二进制打开避免 \r\n 翻译，跨平台输出统一 LF（OF 解析器对 \r 敏感）。
+		return std::ofstream((dir / name).string(), std::ios::out | std::ios::binary | std::ios::trunc);
+	};
+
+	// 1) points
+	{
+		std::ofstream os = openFile("points");
+		if (!os) return false;
+		XFoamWriteFoamFileHeader(os, "vectorField", "points", location);
+		XFoamWritePoints(os, points());
+		os << "\n// ************************************************************************* //\n";
+	}
+	// 2) faces
+	{
+		std::ofstream os = openFile("faces");
+		if (!os) return false;
+		XFoamWriteFoamFileHeader(os, "faceList", "faces", location);
+		XFoamWriteFaces(os, faces());
+		os << "\n// ************************************************************************* //\n";
+	}
+	// owner/neighbour 的 note 字段对齐 OF 写法（被多数后处理工具读出来当 sanity check）。
+	std::string note;
+	{
+		std::ostringstream oss;
+		oss << "nPoints:" << nPnt << "  nCells:" << nCll
+			<< "  nFaces:" << nFac << "  nInternalFaces:" << nInt;
+		note = oss.str();
+	}
+	// 3) owner
+	{
+		std::ofstream os = openFile("owner");
+		if (!os) return false;
+		XFoamWriteFoamFileHeader(os, "labelList", "owner", location, note.c_str());
+		XFoamWriteLabelList(os, faceOwner());
+		os << "\n// ************************************************************************* //\n";
+	}
+	// 4) neighbour
+	{
+		std::ofstream os = openFile("neighbour");
+		if (!os) return false;
+		XFoamWriteFoamFileHeader(os, "labelList", "neighbour", location, note.c_str());
+		XFoamWriteLabelList(os, faceNeighbour());
+		os << "\n// ************************************************************************* //\n";
+	}
+	// 5) boundary
+	{
+		std::ofstream os = openFile("boundary");
+		if (!os) return false;
+		XFoamWriteFoamFileHeader(os, "polyBoundaryMesh", "boundary", location);
+		const XFoam_PolyBoundaryMesh& bm = boundary();
+		const XFoam_Label nPatch = bm.size();
+		os << nPatch << "\n(\n";
+		for (XFoam_Label pi = 0; pi < nPatch; ++pi)
+		{
+			const XFoam_PolyPatch& pp = bm[pi];
+			XFoam_String t("patch");
+			if (patchTypes.size() == nPatch && !patchTypes[pi].empty())
+			{
+				t = static_cast<const XFoam_String&>(patchTypes[pi]);
+			}
+			os << "    " << static_cast<const std::string&>(static_cast<const XFoam_String&>(pp.name())) << "\n"
+			   << "    {\n"
+			   << "        type            " << static_cast<const std::string&>(t) << ";\n"
+			   << "        nFaces          " << pp.size() << ";\n"
+			   << "        startFace       " << pp.start() << ";\n"
+			   << "    }\n";
+		}
+		os << ")\n\n// ************************************************************************* //\n";
+	}
 	return true;
 }
 

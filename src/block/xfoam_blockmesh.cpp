@@ -315,6 +315,15 @@ XFoam_PtrListDictionary<XFoam_Dictionary> XFoam_BlockMesh::patchDicts() const
 	return XFoam_PtrListDictionary<XFoam_Dictionary>();
 }
 
+const XFoam_WordList& XFoam_BlockMesh::patchTypes() const
+{
+	if (patches_.empty())
+	{
+		createPatches();
+	}
+	return patchTypes_;
+}
+
 XFoam_Scalar XFoam_BlockMesh::scaleFactor() const
 {
 	return scaleFactor_;
@@ -349,6 +358,16 @@ const XFoam_FaceListList& XFoam_BlockMesh::patches() const
 
 XFoam_WordList XFoam_BlockMesh::patchNames() const
 {
+	// 先确保 patches_ / patchNames_ 已通过 createPatches() 缓存（直接读 dict，是多 block 也对的）。
+	// 仅当 dict 里没有 boundary 段时，回退到 topology 的边界名（占位单 hex）。
+	if (patches_.empty())
+	{
+		createPatches();
+	}
+	if (!patchNames_.empty())
+	{
+		return patchNames_;
+	}
 	if (!topologyPtr_)
 	{
 		return XFoam_WordList();
@@ -893,6 +912,8 @@ void XFoam_BlockMesh::createCells() const
 void XFoam_BlockMesh::createPatches() const
 {
 	patches_.clear();
+	patchNames_.clear();
+	patchTypes_.clear();
 	if (!meshDict_.found(XFoam_Word("boundary")) && !meshDict_.found(XFoam_Word("patches")))
 	{
 		return;
@@ -902,6 +923,24 @@ void XFoam_BlockMesh::createPatches() const
 	XFoam_FaceListList tmpBlocksPatches;
 	XFoam_PtrListDictionary<XFoam_Dictionary> patchDicts;
 	readBoundary(meshDict_, patchNames, tmpBlocksPatches, patchDicts);
+
+	// 与 patches_ 一一对应缓存名字 / 类型；类型缺省 "patch"，对齐 OF
+	// polyBoundaryMeshEntries 在写 boundary 文件时的默认行为。
+	patchNames_ = patchNames;
+	patchTypes_.setSize(patchNames.size());
+	for (XFoam_Label pi = 0; pi < patchNames.size(); ++pi)
+	{
+		patchTypes_[pi] = XFoam_Word("patch");
+		const XFoam_Dictionary* pd = patchDicts.lookupPtr(patchNames[pi]);
+		if (pd)
+		{
+			XFoam_Word t;
+			if (pd->readIfPresent(XFoam_Word("type"), t) && !t.empty())
+			{
+				patchTypes_[pi] = t;
+			}
+		}
+	}
 
 	const XFoam_BlockMesh& blocks = *this;
 	patches_.setSize(tmpBlocksPatches.size());
