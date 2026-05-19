@@ -189,11 +189,9 @@ TEST_CASE("snap: end-to-end cylinder-in-box → 自适应 level 0/1/2 + 过渡�
 	CHECK(stats.perLevelCells[0] > 0);
 	CHECK(stats.perLevelCells[1] > 0);
 	CHECK(stats.perLevelCells[2] > 0);
-	// L=0 + 8*L=1 + 64*L=2 等于 nRefinedCells
+	// 八叉树叶子直接累加（不像 per-base-cell 那样每个 L 还要乘 8^L）。
 	const XFoam_Label expectRef =
-		stats.perLevelCells[0] +
-		8  * stats.perLevelCells[1] +
-		64 * stats.perLevelCells[2];
+		stats.perLevelCells[0] + stats.perLevelCells[1] + stats.perLevelCells[2];
 	CHECK(stats.nRefinedCells == expectRef);
 	CHECK(stats.nKeptCells > 0);
 	CHECK(stats.nKeptCells < stats.nRefinedCells);
