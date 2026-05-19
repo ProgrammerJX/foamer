@@ -204,3 +204,70 @@ TEST_CASE("snap: end-to-end cylinder-in-box → 自适应 level 0/1/2 + 过渡�
 
 	CHECK(fs::is_regular_file(outDir / "boundary"));
 }
+
+inline std::string XFoamTests_snappyMulti(const char* f)
+{
+	return (XFoamTests_dataDir(f) / "dict" / "snappyHexMeshDict_multi")
+		.generic_string();
+}
+
+TEST_CASE("snap: multi-surface dict parsing (sphere + cylinder1, level 1 and 2)")
+{
+	const XFoam_FileName dictPath(XFoamTests_snappyMulti(__FILE__));
+	REQUIRE(dictPath.type() == XFoam_FileType::file);
+
+	const XFoam_IODictionary dictIO(XFoam_systemDictIO(dictPath));
+	const XFoam_SnappyHexMesh snap(dictIO);
+
+	REQUIRE(snap.surfaces().size() == 2);
+	CHECK(static_cast<const std::string&>(static_cast<const XFoam_String&>(snap.surfaces()[0].name)) == "sphere");
+	CHECK(static_cast<const std::string&>(static_cast<const XFoam_String&>(snap.surfaces()[1].name)) == "cylinder1");
+	CHECK(snap.surfaces()[0].maxLevel == 1);
+	CHECK(snap.surfaces()[1].maxLevel == 2);
+	CHECK(static_cast<const std::string&>(static_cast<const XFoam_String&>(snap.surfaces()[0].file)) == "sphere.stl");
+	CHECK(static_cast<const std::string&>(static_cast<const XFoam_String&>(snap.surfaces()[1].file)) == "cylinder1.stl");
+
+	CHECK(snap.globalRefinementLevel() == 2);
+	CHECK(static_cast<const std::string&>(static_cast<const XFoam_String&>(snap.firstSurfaceName())) == "sphere");
+}
+
+TEST_CASE("snap: multi-surface end-to-end (sphere L1 + cylinder L2 in [-1,1]^3 box)")
+{
+	namespace fs = boost::filesystem;
+	const XFoam_IODictionary bgIO(XFoam_systemDictIO(XFoamTests_blockCyl(__FILE__)));
+	XFoam_BlockMesh bg(bgIO);
+	REQUIRE(bg.cells().size() == 512);
+
+	const XFoam_IODictionary sIO(XFoam_systemDictIO(XFoam_FileName(XFoamTests_snappyMulti(__FILE__))));
+	const XFoam_SnappyHexMesh snappy(sIO);
+	REQUIRE(snappy.surfaces().size() == 2);
+
+	XFoam_TriSurface sphereStl;
+	XFoam_TriSurface cylStl;
+	REQUIRE(sphereStl.read(XFoamTests_sphereStl(__FILE__)));
+	REQUIRE(cylStl.read(XFoamTests_cylinderStl(__FILE__)));
+
+	std::vector<const XFoam_TriSurface*> stls;
+	stls.push_back(&sphereStl);
+	stls.push_back(&cylStl);
+
+	const fs::path outDir = XFoamTests_tmpDir(__FILE__) / "tsnappy_smoke_multi";
+	fs::remove_all(outDir);
+	const XFoam_FileName outF(outDir.generic_string());
+
+	XFoam_SnappyHexMesh::Stats stats;
+	REQUIRE(snappy.run(bg, stls, outF, stats));
+
+	// 两个 STL 都应触发 refinement：L1 来自 sphere bbox-相交、L2 来自 cylinder。
+	CHECK(stats.maxAdaptiveLevel == 2);
+	CHECK(stats.perLevelCells[1] > 0);
+	CHECK(stats.perLevelCells[2] > 0);
+
+	// 至少有 walls patch；其它 surface patch 取决于 cull 后是否有外侧暴露面
+	// (本测试里 cylinder ⊂ sphere → cylinder 的所有 cell 也在 sphere 内被 cull，
+	//  几何上不再有 cylinder 面)。所以可能只看到 walls + sphere。
+	REQUIRE(stats.outPatchNames.size() >= 1);
+	CHECK(static_cast<const std::string&>(static_cast<const XFoam_String&>(stats.outPatchNames[0])) == "walls");
+
+	CHECK(fs::is_regular_file(outDir / "boundary"));
+}

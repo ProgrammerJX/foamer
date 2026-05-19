@@ -13,7 +13,6 @@
 //   - 多 region / cellZones / faceZones
 //   - addLayers（layer 阶段算法 都没写）
 //   - feature edge snap、wordRe 模式
-//   - 多 STL；只用 dict 中 refinementSurfaces 的第一个
 
 #include "XFoam/snap/xfoam_layerparameters.h"
 #include "XFoam/snap/xfoam_refinementparameters.h"
@@ -24,6 +23,7 @@
 #include "XFoam/utilities/xfoam_types.h"
 
 #include <string>
+#include <vector>
 
 class XFoam_BlockMesh;
 class XFoam_Dictionary;
@@ -40,6 +40,19 @@ public:
 		bool castellatedMesh = true; // 加密
 		bool snap = true;            // 表面 snap
 		bool addLayers = false;      // 未实现，默认关
+	};
+
+	/// 一个 refinementSurfaces.<name> 入口；resolveStl() 阶段调用方按 surface name
+	/// 把 STL 装进 stlBySurface 向量并按 surfaces() 的顺序传给 run()。
+	///
+	/// level(min max)：min 当前作为"全局最低"未使用，max 是该 surface 上 cell 的目标 level。
+	/// 文件路径 file：来自 geometry.<name>.file 或 geometry 入口 key 本身（去掉 .stl 同名）。
+	struct SurfaceSpec
+	{
+		XFoam_Word name;        ///< refinementSurfaces 里的 key（也是 patch 名）
+		XFoam_FileName file;    ///< 对应 geometry 入口里的 STL 文件名（不带路径）
+		XFoam_Label minLevel = 0;
+		XFoam_Label maxLevel = 0;
 	};
 
 	struct Stats
@@ -71,25 +84,40 @@ public:
 	const XFoam_LayerParameters& layerParams() const noexcept { return layer_; }
 	const PhaseFlags& phases() const noexcept { return phases_; }
 
-	XFoam_Label globalRefinementLevel() const noexcept { return globalLevel_; }
-	const XFoam_Word& firstSurfaceName() const noexcept { return firstSurfaceName_; }
-	const XFoam_FileName& firstSurfaceFile() const noexcept { return firstSurfaceFile_; }
+	const std::vector<SurfaceSpec>& surfaces() const noexcept { return surfaces_; }
+
+	/// 全局最高 level（所有 surface 的 maxLevel 的 max）；buffer 后 oct 真实达到的 level
+	/// 在 Stats::maxAdaptiveLevel。
+	XFoam_Label globalRefinementLevel() const noexcept;
+
+	/// 向后兼容：仅返回第一个 surface 的 name/file。
+	const XFoam_Word& firstSurfaceName() const noexcept;
+	const XFoam_FileName& firstSurfaceFile() const noexcept;
 
 	/// 自适应 castellatedMesh + snap，直接把生成的 polyMesh 目录写到磁盘。
 	///
 	/// 算法概要：
 	///   1) 基于背景 blockMesh 第 0 个 hex 块建结构化基网格 (nx0, ny0, nz0)。
-	///   2) 为每个 base-cell 分配一个 level：bbox 与 STL 三角面 bbox 有交集的取
-	///      refinementSurfaces.<first>.level 的 max，其他取 0。再按 nCellsBetweenLevels
-	///      做缓冲带扩张，保证相邻 level 差不超过 1。
+	///   2) 每个 base-cell 取所有 surface 中 (bbox 相交 → 该 surface maxLevel) 的 max；
+	///      没有任何 surface 相交者取 0。再按 nCellsBetweenLevels 做缓冲带扩张。
 	///   3) 每个 base-cell 内按 2^level 三轴均匀剖分成 strict-hex sub-cells，cell 中心
-	///      做 STL 内/外判定，保留与 locationInMesh 同侧者。
+	///      做 inside/outside：与 locationInMesh 同侧者保留（"inside" = 任意一个 STL contains）。
 	///   4) 跨 base-cell 的相邻面如果两侧 level 不同（差恰为 1）：粗一侧的 sub-cell 把
 	///      该面切成 2x2 的 4 个 sub-quad（用细一侧已经产生的中点/中心 Steiner 点），
 	///      coarse 侧 sub-cell 变成 9-面 多面体。
-	///   5) 把全局点表、faces、owner/neighbour、patch 表直接写出 polyMesh 目录。
+	///   5) 每个 STL boundary face 按 face centroid 到各 STL 的最近距离归类到对应 patch；
+	///      snap 时该 patch 上的点投到对应 STL 的最近点。
+	///   6) 把全局点表、faces、owner/neighbour、patch 表（walls + 各 STL）直接写出 polyMesh。
 	///
-	/// 假设：单 hex 块；最高 level 与 buffer 之后相邻 level 差为 1；nCellsBetweenLevels >= 1。
+	/// 多 surface 版本：调用方按 surfaces() 的顺序逐个 stl.read() 后传入；stls.size()
+	/// 必须等于 surfaces().size()。允许某项为 nullptr，那对应 surface 视为"不参与"。
+	bool run(
+		const XFoam_BlockMesh& bg,
+		const std::vector<const XFoam_TriSurface*>& stls,
+		const XFoam_FileName& outPolyMeshDir,
+		Stats& stats) const;
+
+	/// 向后兼容：单 STL 的情况包装成 1 项 vector 后调多 surface 版本。
 	bool run(
 		const XFoam_BlockMesh& bg,
 		const XFoam_TriSurface& stl,
@@ -102,13 +130,11 @@ private:
 	XFoam_LayerParameters layer_;
 	PhaseFlags phases_;
 
-	XFoam_Label globalLevel_ = 0;
-	XFoam_Word firstSurfaceName_; // refinementSurfaces 第一个 key
-	XFoam_FileName firstSurfaceFile_;
+	std::vector<SurfaceSpec> surfaces_;
 
 	void readPhaseFlags(const XFoam_Dictionary& snappyDict);
-	void readRefinementSurfacesFirst(const XFoam_Dictionary& snappyDict);
-	void readGeometryFirst(const XFoam_Dictionary& snappyDict);
+	void readRefinementSurfaces(const XFoam_Dictionary& snappyDict);
+	void readGeometry(const XFoam_Dictionary& snappyDict);
 };
 
 #endif

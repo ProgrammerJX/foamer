@@ -110,37 +110,55 @@ int main(int argc, char** argv)
 		const XFoam_IODictionary sDictIO(XFoam_systemDictIO(toX(snappyDict)));
 		XFoam_SnappyHexMesh snappy(sDictIO);
 
-		// stl 路径：CLI > dict.geometry 第一项 + <case>/constant/triSurface/
-		fs::path stlPath;
-		if (!A.stl.empty())
+		// stl 路径解析：每个 surface 一个 STL，按 dict 顺序读取。
+		// CLI -stl 仅在 surface 数量为 1 时支持，作为覆盖项。
+		const auto& specs = snappy.surfaces();
+		if (specs.empty())
 		{
-			stlPath = fs::absolute(A.stl);
+			std::cerr << "No refinementSurfaces in snappyHexMeshDict.\n";
+			return 1;
 		}
-		else
+		std::vector<XFoam_TriSurface> stlStorage(specs.size());
+		std::vector<const XFoam_TriSurface*> stlPtrs(specs.size(), nullptr);
+		for (size_t si = 0; si < specs.size(); ++si)
 		{
-			const std::string n = static_cast<const std::string&>(static_cast<const XFoam_String&>(snappy.firstSurfaceFile()));
-			if (n.empty())
+			fs::path stlPath;
+			if (!A.stl.empty() && specs.size() == 1)
 			{
-				std::cerr << "No STL specified (CLI -stl or dict.geometry).\n";
+				stlPath = fs::absolute(A.stl);
+			}
+			else
+			{
+				const std::string n = static_cast<const std::string&>(
+					static_cast<const XFoam_String&>(specs[si].file));
+				if (n.empty())
+				{
+					std::cerr << "No STL file for surface '"
+					          << static_cast<const std::string&>(static_cast<const XFoam_String&>(specs[si].name))
+					          << "' (geometry.<name>.file missing).\n";
+					return 1;
+				}
+				stlPath = caseDir / "constant" / "triSurface" / n;
+			}
+			std::cout << "STL[" << si << "] (" 
+			          << static_cast<const std::string&>(static_cast<const XFoam_String&>(specs[si].name))
+			          << "): " << stlPath.string() << "\n";
+			if (!fs::is_regular_file(stlPath))
+			{
+				std::cerr << "STL not found: " << stlPath.string() << "\n";
 				return 1;
 			}
-			stlPath = caseDir / "constant" / "triSurface" / n;
+			if (!stlStorage[si].read(stlPath.string()))
+			{
+				std::cerr << "failed to read STL: " << stlPath.string() << "\n";
+				return 1;
+			}
+			stlPtrs[si] = &stlStorage[si];
+			std::cout << "       " << stlStorage[si].size() << " tris, bbox ("
+			          << stlStorage[si].bounds().min().x() << ',' << stlStorage[si].bounds().min().y() << ',' << stlStorage[si].bounds().min().z() << ") .. ("
+			          << stlStorage[si].bounds().max().x() << ',' << stlStorage[si].bounds().max().y() << ',' << stlStorage[si].bounds().max().z() << ")"
+			          << "  level=(" << specs[si].minLevel << ' ' << specs[si].maxLevel << ")\n";
 		}
-		std::cout << "STL                : " << stlPath.string() << "\n";
-		if (!fs::is_regular_file(stlPath))
-		{
-			std::cerr << "STL not found: " << stlPath.string() << "\n";
-			return 1;
-		}
-		XFoam_TriSurface stl;
-		if (!stl.read(stlPath.string()))
-		{
-			std::cerr << "failed to read STL: " << stlPath.string() << "\n";
-			return 1;
-		}
-		std::cout << "STL                : " << stl.size() << " triangles, bbox ("
-		          << stl.bounds().min().x() << ',' << stl.bounds().min().y() << ',' << stl.bounds().min().z() << ") .. ("
-		          << stl.bounds().max().x() << ',' << stl.bounds().max().y() << ',' << stl.bounds().max().z() << ")\n";
 
 		std::cout << "Refinement level   : " << snappy.globalRefinementLevel()
 		          << "  (locationInMesh="
@@ -149,7 +167,7 @@ int main(int argc, char** argv)
 		          << snappy.refineParams().locationInMesh.z() << ')' << std::endl;
 
 		XFoam_SnappyHexMesh::Stats stats;
-		if (!snappy.run(bg, stl, toX(outDir), stats))
+		if (!snappy.run(bg, stlPtrs, toX(outDir), stats))
 		{
 			std::cerr << "snappy.run() failed.\n";
 			return 1;

@@ -226,8 +226,34 @@ XFoam_SnappyHexMesh::XFoam_SnappyHexMesh(const XFoam_Dictionary& dict)
 		if (v.dict) layer_.readDict(*v.dict);
 	}
 	readPhaseFlags(dict);
-	readRefinementSurfacesFirst(dict);
-	readGeometryFirst(dict);
+	readRefinementSurfaces(dict);
+	readGeometry(dict);
+}
+
+XFoam_Label XFoam_SnappyHexMesh::globalRefinementLevel() const noexcept
+{
+	XFoam_Label g = 0;
+	for (size_t i = 0; i < surfaces_.size(); ++i)
+	{
+		if (surfaces_[i].maxLevel > g) g = surfaces_[i].maxLevel;
+	}
+	return g;
+}
+
+namespace
+{
+static const XFoam_Word emptyWordRef_;
+static const XFoam_FileName emptyFileNameRef_;
+} // namespace
+
+const XFoam_Word& XFoam_SnappyHexMesh::firstSurfaceName() const noexcept
+{
+	return surfaces_.empty() ? emptyWordRef_ : surfaces_[0].name;
+}
+
+const XFoam_FileName& XFoam_SnappyHexMesh::firstSurfaceFile() const noexcept
+{
+	return surfaces_.empty() ? emptyFileNameRef_ : surfaces_[0].file;
 }
 
 void XFoam_SnappyHexMesh::readPhaseFlags(const XFoam_Dictionary& dict)
@@ -237,61 +263,81 @@ void XFoam_SnappyHexMesh::readPhaseFlags(const XFoam_Dictionary& dict)
 	(void)dict.readIfPresent(XFoam_Word("addLayers"), phases_.addLayers);
 }
 
-void XFoam_SnappyHexMesh::readRefinementSurfacesFirst(const XFoam_Dictionary& dict)
+void XFoam_SnappyHexMesh::readRefinementSurfaces(const XFoam_Dictionary& dict)
 {
-	// castellatedMeshControls.refinementSurfaces.<surfaceName> { level (a b); ... }
-	// 仅取第一个，level 取 (min max) 的 max 作为全局 L。
+	// castellatedMeshControls.refinementSurfaces.<surfaceName> { level (min max); ... }
+	// 每个 entry 入一个 SurfaceSpec；level 缺失回退 (0 0)。geometry 文件名留待 readGeometry 填。
+	surfaces_.clear();
 	DictView cv = asDict(dict, XFoam_Word("castellatedMeshControls"));
 	if (!cv.dict) return;
 	DictView sv = asDict(*cv.dict, XFoam_Word("refinementSurfaces"));
 	if (!sv.dict) return;
 	const XFoam_WordList keys = sv.dict->toc();
-	if (keys.empty()) return;
-	firstSurfaceName_ = keys[0];
-	DictView pv = asDict(*sv.dict, firstSurfaceName_);
-	const XFoam_Dictionary* sd = pv.dict;
-	if (!sd) return;
-	// level 是个 2-int list（min max）。这里用 readType 取第二个数；解析失败回退 0。
-	const XFoam_Entry* le = sd->lookupEntryPtr(XFoam_Word("level"), false, false);
-	if (!le) return;
-	XFoam_ITstream& is = le->stream();
-	is.rewind();
-	XFoam_Label lvMin = 0, lvMax = 0;
-	XFoam_Token t;
-	is >> t;
-	if (t.isPunctuation() && t.pToken() == XFoam_Token::BEGIN_LIST)
+	for (XFoam_Label i = 0; i < keys.size(); ++i)
 	{
-		int32_t mn = 0, mx = 0;
-		is >> mn >> mx;
-		lvMin = static_cast<XFoam_Label>(mn);
-		lvMax = static_cast<XFoam_Label>(mx);
+		SurfaceSpec spec;
+		spec.name = keys[i];
+		DictView pv = asDict(*sv.dict, spec.name);
+		const XFoam_Dictionary* sd = pv.dict;
+		if (sd)
+		{
+			const XFoam_Entry* le = sd->lookupEntryPtr(XFoam_Word("level"), false, false);
+			if (le)
+			{
+				XFoam_ITstream& is = le->stream();
+				is.rewind();
+				XFoam_Token t;
+				is >> t;
+				if (t.isPunctuation() && t.pToken() == XFoam_Token::BEGIN_LIST)
+				{
+					int32_t mn = 0, mx = 0;
+					is >> mn >> mx;
+					spec.minLevel = static_cast<XFoam_Label>(mn);
+					spec.maxLevel = static_cast<XFoam_Label>(mx);
+				}
+			}
+		}
+		surfaces_.push_back(spec);
 	}
-	(void)lvMin;
-	globalLevel_ = std::max<XFoam_Label>(0, lvMax);
 }
 
-void XFoam_SnappyHexMesh::readGeometryFirst(const XFoam_Dictionary& dict)
+void XFoam_SnappyHexMesh::readGeometry(const XFoam_Dictionary& dict)
 {
-	// geometry { <name>.stl { type triSurfaceMesh; name <name>; } }
-	// 也兼容旧式：geometry { <name>.stl { type triSurfaceMesh; file "<name>.stl"; } }
+	// geometry { <fileKey> { type triSurfaceMesh; name <surfaceName>; } }
+	// 也兼容旧式：geometry { <fileKey> { type triSurfaceMesh; file "<...>"; } }
+	// 通过 name 子项与 refinementSurfaces 的 key 对齐 — 若 entry 无 name 子项，回退
+	// 把 fileKey 自身（去掉扩展名）当作 surface name。
 	DictView gv = asDict(dict, XFoam_Word("geometry"));
 	const XFoam_Dictionary* geo = gv.dict;
 	if (!geo) return;
 	const XFoam_WordList keys = geo->toc();
-	if (keys.empty()) return;
-	const XFoam_Word k0 = keys[0];
-	DictView pv = asDict(*geo, k0);
-	const XFoam_Dictionary* gd = pv.dict;
-	XFoam_Word fileName(static_cast<const XFoam_String&>(k0));
-	if (gd)
+	for (XFoam_Label gi = 0; gi < keys.size(); ++gi)
 	{
-		XFoam_FileName tmp;
-		if (gd->readIfPresent(XFoam_Word("file"), tmp) && !tmp.empty())
+		const XFoam_Word fileKey = keys[gi];
+		DictView pv = asDict(*geo, fileKey);
+		const XFoam_Dictionary* gd = pv.dict;
+		XFoam_Word fileName(static_cast<const XFoam_String&>(fileKey));
+		XFoam_Word surfaceName;
+		if (gd)
 		{
-			fileName = XFoam_Word(static_cast<const XFoam_String&>(tmp));
+			(void)gd->readIfPresent(XFoam_Word("name"), surfaceName);
+			XFoam_FileName tmpFile;
+			if (gd->readIfPresent(XFoam_Word("file"), tmpFile) && !tmpFile.empty())
+			{
+				fileName = XFoam_Word(static_cast<const XFoam_String&>(tmpFile));
+			}
+		}
+		// 找匹配的 SurfaceSpec —— 优先用 entry 的 name 子项；若缺，则用 fileKey 去尾缀对齐。
+		XFoam_Word matchName = surfaceName.empty() ? fileKey : surfaceName;
+		for (size_t si = 0; si < surfaces_.size(); ++si)
+		{
+			if (surfaces_[si].name == matchName)
+			{
+				surfaces_[si].file = XFoam_FileName(static_cast<const XFoam_String&>(fileName));
+				break;
+			}
 		}
 	}
-	firstSurfaceFile_ = XFoam_FileName(static_cast<const XFoam_String&>(fileName));
 }
 
 // ============================================================================
@@ -452,9 +498,24 @@ bool XFoam_SnappyHexMesh::run(
 	const XFoam_FileName& outPolyMeshDir,
 	Stats& stats) const
 {
+	std::vector<const XFoam_TriSurface*> stls(1, &stl);
+	return run(bg, stls, outPolyMeshDir, stats);
+}
+
+bool XFoam_SnappyHexMesh::run(
+	const XFoam_BlockMesh& bg,
+	const std::vector<const XFoam_TriSurface*>& stls,
+	const XFoam_FileName& outPolyMeshDir,
+	Stats& stats) const
+{
+	const XFoam_Label nSurf = static_cast<XFoam_Label>(stls.size());
+	const XFoam_Label nSpec = static_cast<XFoam_Label>(surfaces_.size());
+
 	stats = Stats();
-	stats.refinementLevel = globalLevel_;
-	stats.stlPatchName = firstSurfaceName_.empty() ? XFoam_Word("snappy") : firstSurfaceName_;
+	stats.refinementLevel = globalRefinementLevel();
+	stats.stlPatchName = (nSpec > 0)
+		? surfaces_[0].name
+		: XFoam_Word("snappy");
 
 	// ----- 0. 前置校验 -----
 	if (bg.size() == 0 || !bg.set(0))
@@ -466,9 +527,26 @@ bool XFoam_SnappyHexMesh::run(
 	{
 		std::cerr << "snappy: WARNING: multi-block bg unsupported; only block 0 will be refined.\n";
 	}
-	if (stl.empty())
+	if (nSpec == 0)
 	{
-		std::cerr << "snappy: STL is empty.\n";
+		std::cerr << "snappy: no refinementSurfaces in dict.\n";
+		return false;
+	}
+	if (nSurf != nSpec)
+	{
+		std::cerr << "snappy: ERROR: stls.size()=" << nSurf
+		          << " != surfaces().size()=" << nSpec
+		          << " (调用方需按 surfaces() 顺序传入).\n";
+		return false;
+	}
+	bool anyNonEmpty = false;
+	for (XFoam_Label si = 0; si < nSurf; ++si)
+	{
+		if (stls[si] && !stls[si]->empty()) { anyNonEmpty = true; break; }
+	}
+	if (!anyNonEmpty)
+	{
+		std::cerr << "snappy: all STLs are empty or null.\n";
 		return false;
 	}
 	if (!refine_.hasLocationInMesh)
@@ -504,7 +582,7 @@ bool XFoam_SnappyHexMesh::run(
 	const XFoam_Scalar eps = std::max<XFoam_Scalar>(1e-12, bbDiag * static_cast<XFoam_Scalar>(1e-9));
 	const double invEps = 1.0 / static_cast<double>(eps);
 	const int LEVEL_CAP = 4;
-	const int targetLevel = std::min<int>(static_cast<int>(globalLevel_), LEVEL_CAP);
+	const int targetLevel = std::min<int>(static_cast<int>(globalRefinementLevel()), LEVEL_CAP);
 
 	// ----- 2. 八叉树细化（Octree refinement）-----
 	// 全部拓扑（subdivide / 2:1 balance / 邻居查询）都收在 XFoam_Hex8Ref 里。
@@ -541,12 +619,26 @@ bool XFoam_SnappyHexMesh::run(
 	};
 
 	// ----- 3. Phase 1: 按 STL bbox 加密 -----
-	// "需要 subdivide" 的 predicate：level < target 且 leaf bbox 与 STL bbox 有交集。
-	// level<target 已在 refineByPredicate 内查；这里 predicate 只管 bbox 部分。
+	// 多 surface predicate：任一 STL 与 leaf bbox 相交、且 leaf.level 还没到该 surface 的
+	// maxLevel 时 → 需要 subdivide。每个 surface 独立保各自的 maxLevel（"per-surface cap"），
+	// 全局 refineByPredicate cap 取所有 maxLevel 的 max。
+	std::vector<XFoam_Label> surfMaxLevel(nSurf, 0);
+	for (XFoam_Label si = 0; si < nSurf; ++si)
+	{
+		surfMaxLevel[si] = std::min<XFoam_Label>(surfaces_[si].maxLevel,
+		                                         static_cast<XFoam_Label>(LEVEL_CAP));
+	}
 	oct.refineByPredicate(
 		static_cast<XFoam_Label>(targetLevel),
 		[&](const Leaf& l) -> bool {
-			return stl.boxIntersects(leafBBox(l));
+			const XFoam_BoundBox bb = leafBBox(l);
+			for (XFoam_Label si = 0; si < nSurf; ++si)
+			{
+				if (!stls[si] || stls[si]->empty()) continue;
+				if (l.level >= surfMaxLevel[si]) continue;
+				if (stls[si]->boxIntersects(bb)) return true;
+			}
+			return false;
 		});
 
 	// ----- 4. Phase 1.5: nCellsBetweenLevels buffer 膨胀 -----
@@ -568,10 +660,19 @@ bool XFoam_SnappyHexMesh::run(
 
 	// ----- 6. STL 切除：用 leaf 中心做 inside/outside 判定 -----
 	// pred=true 表示需要被切除；"切除" 的语义 = 与 locationInMesh 不同侧。
-	const bool locInside = stl.contains(refine_.locationInMesh);
+	// "inside" 对多 surface 取 OR：任何一个 STL contains 即视为 inside
+	// (适合 STL 是封闭 obstacle 的并集；不适合 region 隔离需求，未来 #8 处理)。
+	auto insideAny = [&](const XFoam_Vector3D& p) -> bool {
+		for (XFoam_Label si = 0; si < nSurf; ++si)
+		{
+			if (stls[si] && !stls[si]->empty() && stls[si]->contains(p)) return true;
+		}
+		return false;
+	};
+	const bool locInside = insideAny(refine_.locationInMesh);
 	oct.cullByPredicate(
 		[&](const Leaf& l) -> bool {
-			return stl.contains(leafCentroidWorld(l)) != locInside;
+			return insideAny(leafCentroidWorld(l)) != locInside;
 		});
 
 	// ----- 7. kept leaves 编 globalId -----
@@ -805,15 +906,38 @@ bool XFoam_SnappyHexMesh::run(
 	// ----- 7. 把 faces 切成 internal / boundary, 给 boundary 分 patch -----
 	// boundary patch: faces 都是单 cell 引用 (neighbour == -1)
 	//   - fromGridBoundary == true → 背景 walls 顶面 → 原 BlockMesh.patchNames()[0]
-	//   - 否则（dedup 只见 1 次但邻居 base-cell 存在，意味着邻居 sub-cell 被 STL 切掉）→ stl patch
+	//   - 否则 (dedup 只见 1 次但邻居 base-cell 存在，意味着邻居 sub-cell 被 STL 切掉)
+	//     → 归属到该 face centroid 最近的 STL 对应的 patch（多 surface 时）。
 	std::vector<int> internalIdx; internalIdx.reserve(finalFaces.size());
-	std::vector<int> wallsIdx, stlIdx;
+	std::vector<int> wallsIdx;
+	// stlIdxBySurf[si] 收集第 si 个 surface 上的 boundary face 序号
+	std::vector<std::vector<int>> stlIdxBySurf(static_cast<size_t>(nSurf));
+	auto faceCentroid = [&](const FInfo& f) -> XFoam_Vector3D {
+		XFoam_Vector3D c(0, 0, 0);
+		for (int v : f.verts) c = c + pts[v];
+		const XFoam_Scalar inv = static_cast<XFoam_Scalar>(1) / static_cast<XFoam_Scalar>(f.verts.size());
+		return c * inv;
+	};
 	for (int fi = 0; fi < static_cast<int>(finalFaces.size()); ++fi)
 	{
 		const FInfo& f = finalFaces[fi];
-		if (f.neighbour != -1) internalIdx.push_back(fi);
-		else if (f.fromGridBoundary) wallsIdx.push_back(fi);
-		else stlIdx.push_back(fi);
+		if (f.neighbour != -1) { internalIdx.push_back(fi); continue; }
+		if (f.fromGridBoundary) { wallsIdx.push_back(fi); continue; }
+		// 找最近 STL：以 face centroid 到各 STL closestPoint 的距离作判据
+		const XFoam_Vector3D fc = faceCentroid(f);
+		XFoam_Label bestSi = -1;
+		XFoam_Scalar bestD2 = std::numeric_limits<XFoam_Scalar>::max();
+		for (XFoam_Label si = 0; si < nSurf; ++si)
+		{
+			if (!stls[si] || stls[si]->empty()) continue;
+			XFoam_Vector3D cp, nm;
+			stls[si]->closestPointAndNormal(fc, cp, nm);
+			const XFoam_Vector3D d = cp - fc;
+			const XFoam_Scalar d2 = d.x() * d.x() + d.y() * d.y() + d.z() * d.z();
+			if (d2 < bestD2) { bestD2 = d2; bestSi = si; }
+		}
+		if (bestSi < 0) bestSi = 0; // 全空时落第 0 个 (前置已校验非全空)
+		stlIdxBySurf[static_cast<size_t>(bestSi)].push_back(fi);
 	}
 
 	// internal faces 按 (owner, neighbour) 升序排
@@ -826,25 +950,29 @@ bool XFoam_SnappyHexMesh::run(
 	// boundary faces 按 owner 升序，方便定位
 	auto byOwner = [&](int a, int b) { return finalFaces[a].owner < finalFaces[b].owner; };
 	std::sort(wallsIdx.begin(), wallsIdx.end(), byOwner);
-	std::sort(stlIdx.begin(),   stlIdx.end(),   byOwner);
+	for (auto& v : stlIdxBySurf) std::sort(v.begin(), v.end(), byOwner);
 
-	// ----- 8. snap：把 STL patch 上独立点投到 STL 最近点 -----
-	if (phases_.snap && !stlIdx.empty())
+	// ----- 8. snap：每个 surface 上的 boundary 点投到该 surface STL 最近点 -----
+	if (phases_.snap)
 	{
 		std::vector<unsigned char> snapped(pts.size(), 0);
-		for (int fi : stlIdx)
+		for (XFoam_Label si = 0; si < nSurf; ++si)
 		{
-			const FInfo& f = finalFaces[fi];
-			for (int v : f.verts)
+			if (!stls[si] || stls[si]->empty()) continue;
+			for (int fi : stlIdxBySurf[static_cast<size_t>(si)])
 			{
-				if (snapped[v]) continue;
-				snapped[v] = 1;
-				XFoam_Vector3D closest, normal;
-				stl.closestPointAndNormal(pts[v], closest, normal);
-				const XFoam_Scalar d = (closest - pts[v]).mag();
-				if (d > stats.maxSnapDistance) stats.maxSnapDistance = d;
-				pts[v] = closest;
-				++stats.nSnappedPoints;
+				const FInfo& f = finalFaces[fi];
+				for (int v : f.verts)
+				{
+					if (snapped[v]) continue;
+					snapped[v] = 1;
+					XFoam_Vector3D closest, normal;
+					stls[si]->closestPointAndNormal(pts[v], closest, normal);
+					const XFoam_Scalar d = (closest - pts[v]).mag();
+					if (d > stats.maxSnapDistance) stats.maxSnapDistance = d;
+					pts[v] = closest;
+					++stats.nSnappedPoints;
+				}
 			}
 		}
 	}
@@ -883,9 +1011,12 @@ bool XFoam_SnappyHexMesh::run(
 	const std::string wallType = origTypes.empty() ? std::string("wall")
 		: std::string(static_cast<const std::string&>(static_cast<const XFoam_String&>(origTypes[0])));
 	addPatch(wallsIdx, wallName, wallType);
-	addPatch(stlIdx,
-		std::string(static_cast<const std::string&>(static_cast<const XFoam_String&>(stats.stlPatchName))),
-		std::string("wall"));
+	for (XFoam_Label si = 0; si < nSurf; ++si)
+	{
+		const std::string pname = std::string(
+			static_cast<const std::string&>(static_cast<const XFoam_String&>(surfaces_[si].name)));
+		addPatch(stlIdxBySurf[static_cast<size_t>(si)], pname, std::string("wall"));
+	}
 
 	stats.outPatchNames.setSize(static_cast<XFoam_Label>(patchNamesOut.size()));
 	stats.outPatchTypes.setSize(static_cast<XFoam_Label>(patchTypesOut.size()));
