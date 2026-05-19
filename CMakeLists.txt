@@ -1,26 +1,55 @@
-cmake_minimum_required(VERSION 3.16)
-project(myfoam VERSION 0.1.0 LANGUAGES CXX)
+set(MODULE_NAME XFoam)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+set(XFOAM_SCALAR "DOUBLE" CACHE STRING "FLOAT/DOUBLE/LONGDOUBLE")
 
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif()
-
-if(MSVC)
-    add_compile_options(/W4 /permissive- /utf-8)
+if("FLOAT" STREQUAL ${XFOAM_SCALAR})
+    add_definitions(-DXFOAM_SCALAR_FLOAT)
+elseif("DOUBLE" STREQUAL ${XFOAM_SCALAR})
+    add_definitions(-DXFOAM_SCALAR_DOUBLE)
+elseif("LONGDOUBLE" STREQUAL ${XFOAM_SCALAR})
+    add_definitions(-DXFOAM_SCALAR_LONGDOUBLE)
 else()
-    add_compile_options(-Wall -Wextra -Wpedantic)
+    add_definitions(-DXFOAM_SCALAR_DOUBLE)
 endif()
 
-# All headers under src/ are accessible as <module/path/header.hpp>
-include_directories(${CMAKE_SOURCE_DIR}/src)
+x_prepare_add_module()
+x_add_module_subdir(foam)
+x_add_module_subdir(tools)
+x_add_module_subdir(block)
+x_add_module_subdir(snappyhexmesh)
+x_add_module_subdir(utilities)
+x_add_module_subdir(primitive)
+x_add_module_subdir(mesh)
+x_add_module_subdir(topo)
+x_add_module_subdir(cartesian)
 
-enable_testing()
+add_nlohmann_json()
+x_add_occt()
+# XFoam library: no XCommon/XData; tests/sample still link XCommon below.
+x_add_module()
 
-add_subdirectory(src/OpenFOAM)
-add_subdirectory(src/mesh/blockMesh)
-add_subdirectory(applications/utilities/mesh/blockMesh)
-add_subdirectory(tests)
+###########################################
+
+x_prepare_add_module()
+set(TEST_MODULE_NAME foam-core)
+add_nlohmann_json()
+x_add_lib(XCommon)
+x_add_lib(XFoam)
+x_add_testing_module()
+
+###########################################
+
+x_prepare_add_module()
+set(TEST_MODULE_NAME foam-mesh)
+add_nlohmann_json()
+x_add_lib(XCommon)
+x_add_lib(XFoam)
+x_add_testing_module()
+
+##################################################
+
+x_prepare_add_module()
+set(SAMPLE_NAME foam-core)
+x_add_occt()
+x_add_lib(XFoam)
+x_add_sample()
