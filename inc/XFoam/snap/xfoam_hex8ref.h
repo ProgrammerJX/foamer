@@ -115,6 +115,16 @@ public:
 	/// 就 subdivide 自己；迭代直至稳定。OpenFOAM 的 hexRef8::consistentRefinement 同义。
 	void balance21();
 
+	/// Phase 1.5：把"高 level 区域"沿 face 邻居方向膨胀 nLayers 圈。
+	/// 每一轮：找出所有"有更粗 face 邻居"的 leaf，把这些粗邻居 subdivide 一级（把它们升到与
+	/// 当前细侧同级）。等价 OpenFOAM 的 meshRefinement::extendMarkedCells + nBufferLayers > 1。
+	///
+	/// nLayers == 0 → no-op；nLayers == 1 即"在 balance21 之前先膨胀 1 圈"，恰好让 dict 里
+	/// nCellsBetweenLevels = 2 落地（balance21 自己保证 1 cell intermediate，再 +1 cell buffer）。
+	///
+	/// 通常调用顺序：refineByPredicate → extendHighLevel(N-1) → balance21
+	void extendHighLevel(int nLayers);
+
 	/// Phase 3：按 predicate 标记 kept。pred(leaf) == true 表示该 leaf 应被切除（kept = false）。
 	void cullByPredicate(const LeafPredicate& pred);
 

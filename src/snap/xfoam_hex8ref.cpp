@@ -198,6 +198,57 @@ void XFoam_Hex8Ref::balance21()
 	}
 }
 
+void XFoam_Hex8Ref::extendHighLevel(int nLayers)
+{
+	// 每一轮（pass）：
+	//   1) 重建 leafMap_
+	//   2) 找所有"自身 level > 0 且至少有一个 Coarser face 邻居"的 leaf — 这是当前"细侧前沿"
+	//   3) 把它们的所有 Coarser face 邻居 leaf 索引收到 toSubdivide
+	//   4) 去重，按降序 subdivide（subdivide 是 in-place + push_back，旧 idx<X 不动）
+	//
+	// 单轮把"前沿"外扩 1 圈；nLayers 轮就外扩 nLayers 圈。每轮新增的 leaves 仍是粗侧（比刚
+	// 升的细侧低 1 级），下一轮自然成为新的"前沿粗邻居"。
+	for (int iter = 0; iter < nLayers; ++iter)
+	{
+		rebuildLeafMap();
+		std::vector<XFoam_Label> toSubdivide;
+		toSubdivide.reserve(leaves_.size() / 4);
+
+		for (size_t i = 0; i < leaves_.size(); ++i)
+		{
+			const Leaf& l = leaves_[i];
+			if (l.level == 0) continue;
+			for (int d = 0; d < 6; ++d)
+			{
+				const FaceNbr nbr = resolveFaceNeighbor(l, d);
+				if (nbr.kind == FaceNbrKind::Coarser && nbr.leafIdx >= 0)
+				{
+					// 只升 level == self.level - 1 的邻居；更粗的 (差 ≥ 2) 留给 balance21 处理，
+					// 避免一次性把"远端粗 cell"无意义地拉细。
+					if (leaves_[nbr.leafIdx].level == l.level - 1)
+					{
+						toSubdivide.push_back(nbr.leafIdx);
+					}
+				}
+			}
+		}
+
+		if (toSubdivide.empty()) break;
+
+		std::sort(toSubdivide.begin(), toSubdivide.end());
+		toSubdivide.erase(std::unique(toSubdivide.begin(), toSubdivide.end()), toSubdivide.end());
+		// 降序处理：subdivide(idx) 不动 < idx 的项，遇 push_back 也只追加在尾；不会失效。
+		std::sort(toSubdivide.rbegin(), toSubdivide.rend());
+		for (XFoam_Label idx : toSubdivide)
+		{
+			if (leaves_[idx].level < levelCap_)
+			{
+				subdivide(idx);
+			}
+		}
+	}
+}
+
 void XFoam_Hex8Ref::cullByPredicate(const LeafPredicate& pred)
 {
 	for (size_t i = 0; i < leaves_.size(); ++i)

@@ -101,37 +101,33 @@ struct PointKeyHash
 	}
 };
 
-// face dedup 用的有序顶点元组键。最多 4 顶点（quad），多边形我们这里只产生 quad
-// （split face 也是 4 个独立 quad），所以 4 个 int 足够。
+// face dedup 用的有序顶点元组键。多边形最多 8 顶点（hex 6 边 + 边切了产生的中点；任何
+// 单面最多 4 条边 + 4 个边中点 = 8）。
 struct FaceKey
 {
-	int v[4]; // 升序
-	bool operator==(const FaceKey& o) const noexcept
-	{
-		return v[0] == o.v[0] && v[1] == o.v[1] && v[2] == o.v[2] && v[3] == o.v[3];
-	}
+	std::vector<int> v; // 升序
+	bool operator==(const FaceKey& o) const noexcept { return v == o.v; }
 };
 
 struct FaceKeyHash
 {
 	size_t operator()(const FaceKey& k) const noexcept
 	{
-		uint64_t h = static_cast<uint32_t>(k.v[0]);
-		for (int i = 1; i < 4; ++i)
+		uint64_t h = 0;
+		for (int x : k.v)
 		{
-			h = h * 0x9E3779B97F4A7C15ull + static_cast<uint32_t>(k.v[i]);
+			h = h * 0x9E3779B97F4A7C15ull + static_cast<uint32_t>(x);
 		}
 		h ^= (h >> 33);
 		return static_cast<size_t>(h);
 	}
 };
 
-inline FaceKey makeFaceKey(int a, int b, int c, int d)
+inline FaceKey makeFaceKey(const std::vector<int>& verts)
 {
-	int t[4] = {a, b, c, d};
-	std::sort(t, t + 4);
 	FaceKey k;
-	k.v[0] = t[0]; k.v[1] = t[1]; k.v[2] = t[2]; k.v[3] = t[3];
+	k.v = verts;
+	std::sort(k.v.begin(), k.v.end());
 	return k;
 }
 } // namespace
@@ -553,7 +549,16 @@ bool XFoam_SnappyHexMesh::run(
 			return stl.boxIntersects(leafBBox(l));
 		});
 
-	// ----- 4. Phase 2: 2:1 face-balance -----
+	// ----- 4. Phase 1.5: nCellsBetweenLevels buffer 膨胀 -----
+	// OF 语义：nCellsBetweenLevels=N → 相邻不同 level 间至少 N 个中间 level cell。
+	// balance21() 自带 1 个中间 cell；外扩 (N-1) 圈把高 level 区域沿 face 邻居向粗侧膨胀。
+	const int nBufferLayers = std::max(0, static_cast<int>(refine_.nCellsBetweenLevels) - 1);
+	if (nBufferLayers > 0)
+	{
+		oct.extendHighLevel(nBufferLayers);
+	}
+
+	// ----- 4'. Phase 2: 2:1 face-balance -----
 	oct.balance21();
 
 	// ----- 5. 统计 per-level cell 数 -----
@@ -615,13 +620,15 @@ bool XFoam_SnappyHexMesh::run(
 	finalFaces.reserve(leaves.size() * 6);
 	faceIdx.reserve(leaves.size() * 6);
 
-	auto emitQuad = [&](int v0, int v1, int v2, int v3, int cellId, bool onGridBoundary) {
-		const FaceKey key = makeFaceKey(v0, v1, v2, v3);
+	// emit 任意 N 边形（N >= 3）；用排序顶点集做 dedup。第二次遇到时按 OF 约定
+	// 设小 cellId 为 owner，并反转 verts 让法向从 owner → neighbour。
+	auto emitFace = [&](const std::vector<int>& verts, int cellId, bool onGridBoundary) {
+		const FaceKey key = makeFaceKey(verts);
 		auto it = faceIdx.find(key);
 		if (it == faceIdx.end())
 		{
 			FInfo f;
-			f.verts = { v0, v1, v2, v3 };
+			f.verts = verts;
 			f.owner = cellId;
 			f.neighbour = -1;
 			f.fromGridBoundary = onGridBoundary;
@@ -660,6 +667,47 @@ bool XFoam_SnappyHexMesh::run(
 		return addPoint(p);
 	};
 
+	// 查全局点表里是否已有 pts[vA] 与 pts[vB] 的中点（用同 invEps 容差量化哈希）。
+	// 若有 → 返回那个点 id；否则 -1。
+	// 这是 OpenFOAM hexRef8 "在 face 边上插入更高 pointLevel 的中点" 的等价实现：
+	// 只要别处某个 split face 把这条边对应的中点 addPoint 过，本面 emit 时就插入它。
+	auto midPointId = [&](int vA, int vB) -> int {
+		const XFoam_Vector3D mid = (pts[vA] + pts[vB]) * 0.5;
+		PointKey k{
+			static_cast<int64_t>(std::llround(mid.x() * invEps)),
+			static_cast<int64_t>(std::llround(mid.y() * invEps)),
+			static_cast<int64_t>(std::llround(mid.z() * invEps))
+		};
+		auto it = ptIdx.find(k);
+		return (it != ptIdx.end()) ? it->second : -1;
+	};
+
+	// ----- 10a. 预 pass：把所有 split face 的 9 个 Steiner 点先 addPoint 进 ptIdx -----
+	// 这样后面任何 cell emit 自己的"非 split 面"时，midPointId 都能查到边中点。
+	// 不在这里 emit 任何 face；只 populate 点表。
+	for (size_t s = 0; s < leaves.size(); ++s)
+	{
+		const Leaf& l = leaves[s];
+		if (!l.kept) continue;
+		for (int d = 0; d < 6; ++d)
+		{
+			const XFoam_Hex8Ref::FaceNbr nbr = oct.resolveFaceNeighbor(l, d);
+			if (nbr.kind != XFoam_Hex8Ref::FaceNbrKind::Finer) continue;
+			for (int rr = 0; rr < 3; ++rr)
+			{
+				for (int cc = 0; cc < 3; ++cc)
+				{
+					(void)faceFinePoint(l, d, rr, cc);
+				}
+			}
+		}
+	}
+
+	// 切面 sub-quad 自然 winding (rr,cc)→(rr,cc+1)→(rr+1,cc+1)→(rr+1,cc) 等价
+	//   +axA × +axB；对 d=0/3/4 与 outward 法向相反，需翻转，否则负体积。
+	static const bool kFlipSub[6] = {true, false, false, true, true, false};
+
+	// ----- 10b. 正式 emit -----
 	for (size_t s = 0; s < leaves.size(); ++s)
 	{
 		const Leaf& l = leaves[s];
@@ -668,28 +716,11 @@ bool XFoam_SnappyHexMesh::run(
 
 		for (int d = 0; d < 6; ++d)
 		{
-			const int* fv = kHexFace[d];
-			const int gv[4] = { l.corner[fv[0]], l.corner[fv[1]], l.corner[fv[2]], l.corner[fv[3]] };
-
 			const XFoam_Hex8Ref::FaceNbr nbr = oct.resolveFaceNeighbor(l, d);
 
-			if (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::OutOfGrid)
-			{
-				// background grid 边 → walls patch
-				emitQuad(gv[0], gv[1], gv[2], gv[3], l.cellId, true);
-				continue;
-			}
-			if (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::Same
-			 || nbr.kind == XFoam_Hex8Ref::FaceNbrKind::Coarser)
-			{
-				// 同 level 或粗一级邻居：发一个 quad。粗侧自己会发 split sub-quad 与我对齐。
-				// 若邻居不 kept，本面 dedup 失败 → 留作 boundary (stl patch)。
-				emitQuad(gv[0], gv[1], gv[2], gv[3], l.cellId, false);
-				continue;
-			}
 			if (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::Finer)
 			{
-				// 我是粗侧：把这面切成 2x2 = 4 个 sub-quad。Steiner 9 点都通过 dedup 与细侧对齐。
+				// 我是粗侧：切 2x2 sub-quad。
 				int pgrid[3][3];
 				for (int rr = 0; rr < 3; ++rr)
 				{
@@ -698,23 +729,75 @@ bool XFoam_SnappyHexMesh::run(
 						pgrid[rr][cc] = faceFinePoint(l, d, rr, cc);
 					}
 				}
+				const bool flipSub = kFlipSub[d];
 				for (int rr = 0; rr < 2; ++rr)
 				{
 					for (int cc = 0; cc < 2; ++cc)
 					{
-						emitQuad(pgrid[rr][cc], pgrid[rr][cc + 1],
-						         pgrid[rr + 1][cc + 1], pgrid[rr + 1][cc],
-						         l.cellId, false);
+						int q[4];
+						if (flipSub)
+						{
+							q[0] = pgrid[rr][cc];
+							q[1] = pgrid[rr + 1][cc];
+							q[2] = pgrid[rr + 1][cc + 1];
+							q[3] = pgrid[rr][cc + 1];
+						}
+						else
+						{
+							q[0] = pgrid[rr][cc];
+							q[1] = pgrid[rr][cc + 1];
+							q[2] = pgrid[rr + 1][cc + 1];
+							q[3] = pgrid[rr + 1][cc];
+						}
+						// sub-quad 的 4 条边可能也有更深层 (L+2 等) 的中点；同样要
+						// 与对侧 fine cell 的 polygon emit 对齐，否则 dedup 失败。
+						std::vector<int> sq;
+						sq.reserve(8);
+						for (int i = 0; i < 4; ++i)
+						{
+							const int vA = q[i];
+							const int vB = q[(i + 1) % 4];
+							sq.push_back(vA);
+							const int mid = midPointId(vA, vB);
+							if (mid >= 0 && mid != vA && mid != vB)
+							{
+								sq.push_back(mid);
+							}
+						}
+						emitFace(sq, l.cellId, false);
 						++stats.nSplitFaces;
 					}
 				}
 				isPoly = true;
 				continue;
 			}
-			// FaceNbrKind::None：邻居 base-cell 存在但 leafMap 里找不到 leaf — 不该发生
-			std::cerr << "snappy: WARNING: leaf (" << l.ai << "," << l.aj << "," << l.ak << ", L=" << l.level
-			          << ") face d=" << d << " has no neighbor leaf in any level. Emitting as boundary.\n";
-			emitQuad(gv[0], gv[1], gv[2], gv[3], l.cellId, false);
+
+			// 非 split face：可能仍是 polygon — 若 hex 角点连边的中点被别的 cell split
+			// 时 addPoint 过，则插入该中点。最多 4 个边 → 最多多插 4 个点 → polygon 最大 8 边。
+			const int* fv = kHexFace[d];
+			std::vector<int> verts;
+			verts.reserve(8);
+			for (int i = 0; i < 4; ++i)
+			{
+				const int vA = l.corner[fv[i]];
+				const int vB = l.corner[fv[(i + 1) % 4]];
+				verts.push_back(vA);
+				const int mid = midPointId(vA, vB);
+				if (mid >= 0 && mid != vA && mid != vB)
+				{
+					verts.push_back(mid);
+					isPoly = true;
+				}
+			}
+
+			const bool onGridBoundary = (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::OutOfGrid);
+			if (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::None)
+			{
+				std::cerr << "snappy: WARNING: leaf (" << l.ai << "," << l.aj << "," << l.ak
+				          << ", L=" << l.level << ") face d=" << d
+				          << " has no neighbor leaf in any level. Emitting as boundary.\n";
+			}
+			emitFace(verts, l.cellId, onGridBoundary);
 		}
 		if (isPoly) ++stats.nPolyhedralCells;
 	}
