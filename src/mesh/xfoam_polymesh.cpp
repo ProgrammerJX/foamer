@@ -408,6 +408,9 @@ XFoam_LabelListList XFoam_PolyMesh::cellShapePointCells
 {
     XFoam_DynamicList<XFoam_LabelList, XFoam_PrimitiveMesh::cellsPerPoint_>
         pc(static_cast<XFoam_Label>(points_.size()));
+    // XFoam_DynamicList(N) 仅 store_.resize(N)，但 sizeAddr_ 仍为 0 且 UList 视图指针为 nullptr，
+    // 而下面循环按 pc[curPoint] 索引必须可寻址。OF 原 polyMeshFromShapeMesh.C 行为是 size=capacity=N。
+    pc.setSize(static_cast<XFoam_Label>(points_.size()));
 
     // For each cell
     XFoam_forAll(cellsAsShapes, i)
@@ -932,12 +935,14 @@ XFoam_PolyMesh::XFoam_PolyMesh(
 	boundary_.setSize(nAllPatches);
 
 	bounds_ = XFoam_BoundBox(points_);
-	calcCellFaces();
+	// reset() 必须先于 calcCellFaces()：后者 cellFaces_.setSize(nCells()) 依赖已缓存的 nCells_，
+	// 否则 nCells_ 仍为默认 0，cellFaces_[c] 立即越界。原顺序复现 SIGSEGV，已修正。
 	this->reset(
 		static_cast<XFoam_Label>(points_.size()),
 		neighbour_.size(),
 		static_cast<XFoam_Label>(faces_.size()),
 		calcNCells_(owner_));
+	calcCellFaces();
 	boundary_.topoChange();
 	boundary_.calcGeometry();
 }
