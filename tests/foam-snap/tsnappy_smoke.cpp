@@ -211,6 +211,46 @@ inline std::string XFoamTests_snappyMulti(const char* f)
 		.generic_string();
 }
 
+inline std::string XFoamTests_blockTwoBlock(const char* f)
+{
+	return (XFoamTests_dataDir(f) / "dict" / "blockMeshDict_twoBlock")
+		.generic_string();
+}
+
+TEST_CASE("snap: 2-block background ([−1,0]∪[0,1]×[−1,1]²) gives same mesh as single block")
+{
+	namespace fs = boost::filesystem;
+	// 2-block bg：每块 (4,8,8)，沿 x=0 切；并起来跟单块 (8,8,8) 在 [-1,1]^3 完全等价
+	const XFoam_IODictionary bgIO(XFoam_systemDictIO(XFoam_FileName(XFoamTests_blockTwoBlock(__FILE__))));
+	XFoam_BlockMesh bg(bgIO);
+	REQUIRE(bg.size() == 2);
+	REQUIRE(bg.cells().size() == 512);
+
+	const XFoam_IODictionary sIO(XFoam_systemDictIO(XFoamTests_snappyCyl(__FILE__)));
+	const XFoam_SnappyHexMesh snappy(sIO);
+
+	XFoam_TriSurface stl;
+	REQUIRE(stl.read(XFoamTests_cylinderStl(__FILE__)));
+
+	const fs::path outDir = XFoamTests_tmpDir(__FILE__) / "tsnappy_smoke_2blk";
+	fs::remove_all(outDir);
+	const XFoam_FileName outF(outDir.generic_string());
+
+	XFoam_SnappyHexMesh::Stats stats;
+	REQUIRE(snappy.run(bg, stl, outF, stats));
+
+	// 与单 block cylinder 测试一致：跨 block 共享面靠 pts/face dedup 自动合并
+	CHECK(stats.nBgCells == 512);
+	CHECK(stats.maxAdaptiveLevel == 2);
+	CHECK(stats.nKeptCells == 1116);
+	CHECK(stats.nFaces == 3917);
+	CHECK(stats.nInternalFaces == 3331);
+	CHECK(stats.nBoundaryFaces == 586);
+	CHECK(stats.nPoints == 1810);
+	CHECK(stats.nPolyhedralCells == 264);
+	CHECK(fs::is_regular_file(outDir / "boundary"));
+}
+
 TEST_CASE("snap: multi-surface dict parsing (sphere + cylinder1, level 1 and 2)")
 {
 	const XFoam_FileName dictPath(XFoamTests_snappyMulti(__FILE__));

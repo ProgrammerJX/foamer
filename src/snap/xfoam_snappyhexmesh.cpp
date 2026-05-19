@@ -518,14 +518,18 @@ bool XFoam_SnappyHexMesh::run(
 		: XFoam_Word("snappy");
 
 	// ----- 0. 前置校验 -----
-	if (bg.size() == 0 || !bg.set(0))
+	if (bg.size() == 0)
 	{
-		std::cerr << "snappy: background BlockMesh has no usable block 0.\n";
+		std::cerr << "snappy: background BlockMesh has no blocks.\n";
 		return false;
 	}
-	if (bg.size() > 1)
+	for (XFoam_Label bi = 0; bi < bg.size(); ++bi)
 	{
-		std::cerr << "snappy: WARNING: multi-block bg unsupported; only block 0 will be refined.\n";
+		if (!bg.set(bi))
+		{
+			std::cerr << "snappy: background BlockMesh block " << bi << " not constructible.\n";
+			return false;
+		}
 	}
 	if (nSpec == 0)
 	{
@@ -555,54 +559,90 @@ bool XFoam_SnappyHexMesh::run(
 		return false;
 	}
 
-	// ----- 1. block-0 物理 8 顶点 + 基网格分辨率 -----
-	const XFoam_BlockDescriptor& bd = bg[0];
-	const XFoam_CellShape& shape0 = bd.blockShape();
-	const XFoam_UList<XFoam_Vector3D>& bv = bd.vertices();
-	XFoam_Vector3D blockCorner[8];
-	XFoam_Vector3D bbMin = bv[shape0[0]] * bg.scaleFactor();
-	XFoam_Vector3D bbMax = bbMin;
-	for (int i = 0; i < 8; ++i)
-	{
-		blockCorner[i] = bv[shape0[i]] * bg.scaleFactor();
-		bbMin.x() = std::min(bbMin.x(), blockCorner[i].x());
-		bbMin.y() = std::min(bbMin.y(), blockCorner[i].y());
-		bbMin.z() = std::min(bbMin.z(), blockCorner[i].z());
-		bbMax.x() = std::max(bbMax.x(), blockCorner[i].x());
-		bbMax.y() = std::max(bbMax.y(), blockCorner[i].y());
-		bbMax.z() = std::max(bbMax.z(), blockCorner[i].z());
-	}
-	const int Nx = static_cast<int>(bd.density().x());
-	const int Ny = static_cast<int>(bd.density().y());
-	const int Nz = static_cast<int>(bd.density().z());
-	stats.nBgCells = static_cast<XFoam_Label>(Nx) * Ny * Nz;
+	using Leaf = XFoam_Hex8Ref::Leaf;
 
-	// 点 dedup 容差：以背景 bbox 对角为尺度，1e-9 相对量级。
+	// ----- 1. 收集所有 block 几何 + 全局 bbox -----
+	struct BlockData
+	{
+		XFoam_Vector3D corner[8];
+		int Nx = 0, Ny = 0, Nz = 0;
+		XFoam_Label cellIdOffset = 0;
+	};
+	const XFoam_Label nBlocks = bg.size();
+	std::vector<BlockData> blocks(static_cast<size_t>(nBlocks));
+	XFoam_Vector3D bbMin(0, 0, 0), bbMax(0, 0, 0);
+	bool bbInit = false;
+	XFoam_Label totalBgCells = 0;
+	for (XFoam_Label bi = 0; bi < nBlocks; ++bi)
+	{
+		const XFoam_BlockDescriptor& bd = bg[bi];
+		const XFoam_CellShape& shp = bd.blockShape();
+		const XFoam_UList<XFoam_Vector3D>& bv = bd.vertices();
+		BlockData& B = blocks[static_cast<size_t>(bi)];
+		for (int i = 0; i < 8; ++i)
+		{
+			B.corner[i] = bv[shp[i]] * bg.scaleFactor();
+			if (!bbInit)
+			{
+				bbMin = bbMax = B.corner[i];
+				bbInit = true;
+			}
+			else
+			{
+				bbMin.x() = std::min(bbMin.x(), B.corner[i].x());
+				bbMin.y() = std::min(bbMin.y(), B.corner[i].y());
+				bbMin.z() = std::min(bbMin.z(), B.corner[i].z());
+				bbMax.x() = std::max(bbMax.x(), B.corner[i].x());
+				bbMax.y() = std::max(bbMax.y(), B.corner[i].y());
+				bbMax.z() = std::max(bbMax.z(), B.corner[i].z());
+			}
+		}
+		B.Nx = static_cast<int>(bd.density().x());
+		B.Ny = static_cast<int>(bd.density().y());
+		B.Nz = static_cast<int>(bd.density().z());
+		totalBgCells += static_cast<XFoam_Label>(B.Nx) * B.Ny * B.Nz;
+	}
+	stats.nBgCells = totalBgCells;
+
+	// 点 dedup 容差：以全局 bbox 对角为尺度，1e-9 相对量级。
 	const XFoam_Scalar bbDiag = (bbMax - bbMin).mag();
 	const XFoam_Scalar eps = std::max<XFoam_Scalar>(1e-12, bbDiag * static_cast<XFoam_Scalar>(1e-9));
 	const double invEps = 1.0 / static_cast<double>(eps);
 	const int LEVEL_CAP = 4;
 	const int targetLevel = std::min<int>(static_cast<int>(globalRefinementLevel()), LEVEL_CAP);
 
-	// ----- 2. 八叉树细化（Octree refinement）-----
-	// 全部拓扑（subdivide / 2:1 balance / 邻居查询）都收在 XFoam_Hex8Ref 里。
-	// 这里只负责把 *world coords* 上的判断（leaf bbox 与 STL 相交、leaf 中心在 STL 哪一侧）
-	// 通过 paramToWorld 翻译给它。
-	XFoam_Hex8Ref oct(Nx, Ny, Nz, LEVEL_CAP);
-	oct.initBaseLeaves();
+	// 通用 surface maxLevel 取上限。
+	std::vector<XFoam_Label> surfMaxLevel(nSurf, 0);
+	for (XFoam_Label si = 0; si < nSurf; ++si)
+	{
+		surfMaxLevel[si] = std::min<XFoam_Label>(surfaces_[si].maxLevel,
+		                                         static_cast<XFoam_Label>(LEVEL_CAP));
+	}
 
-	using Leaf = XFoam_Hex8Ref::Leaf;
+	// ----- 2. 每个 block 独立建 Hex8Ref + 各 phase -----
+	// 跨 block 共享面在最终 emit 阶段靠 pts dedup + face dedup 自动合成 internal。
+	std::vector<XFoam_Hex8Ref> octs;
+	octs.reserve(static_cast<size_t>(nBlocks));
+	for (XFoam_Label bi = 0; bi < nBlocks; ++bi)
+	{
+		octs.emplace_back(blocks[static_cast<size_t>(bi)].Nx,
+		                  blocks[static_cast<size_t>(bi)].Ny,
+		                  blocks[static_cast<size_t>(bi)].Nz,
+		                  LEVEL_CAP);
+		octs.back().initBaseLeaves();
+	}
 
-	auto leafCornersWorld = [&](const Leaf& l, XFoam_Vector3D out[8]) {
+	// 通用辅助：根据 leaf 所属的 block 计算 world 坐标。
+	auto leafCornersWorldB = [&](const BlockData& B, const Leaf& l, XFoam_Vector3D out[8]) {
 		for (int oc = 0; oc < 8; ++oc)
 		{
 			XFoam_Scalar u, v, w;
 			XFoam_Hex8Ref::leafCornerParam(l, oc, u, v, w);
-			out[oc] = paramToWorld(blockCorner, Nx, Ny, Nz, l.ai, l.aj, l.ak, u, v, w);
+			out[oc] = paramToWorld(B.corner, B.Nx, B.Ny, B.Nz, l.ai, l.aj, l.ak, u, v, w);
 		}
 	};
-	auto leafBBox = [&](const Leaf& l) -> XFoam_BoundBox {
-		XFoam_Vector3D c[8]; leafCornersWorld(l, c);
+	auto leafBBoxB = [&](const BlockData& B, const Leaf& l) -> XFoam_BoundBox {
+		XFoam_Vector3D c[8]; leafCornersWorldB(B, l, c);
 		XFoam_Vector3D mn = c[0], mx = c[0];
 		for (int i = 1; i < 8; ++i)
 		{
@@ -612,56 +652,12 @@ bool XFoam_SnappyHexMesh::run(
 		}
 		return XFoam_BoundBox(mn, mx);
 	};
-	auto leafCentroidWorld = [&](const Leaf& l) -> XFoam_Vector3D {
+	auto leafCentroidWorldB = [&](const BlockData& B, const Leaf& l) -> XFoam_Vector3D {
 		XFoam_Scalar u, v, w;
 		XFoam_Hex8Ref::leafCentroidParam(l, u, v, w);
-		return paramToWorld(blockCorner, Nx, Ny, Nz, l.ai, l.aj, l.ak, u, v, w);
+		return paramToWorld(B.corner, B.Nx, B.Ny, B.Nz, l.ai, l.aj, l.ak, u, v, w);
 	};
 
-	// ----- 3. Phase 1: 按 STL bbox 加密 -----
-	// 多 surface predicate：任一 STL 与 leaf bbox 相交、且 leaf.level 还没到该 surface 的
-	// maxLevel 时 → 需要 subdivide。每个 surface 独立保各自的 maxLevel（"per-surface cap"），
-	// 全局 refineByPredicate cap 取所有 maxLevel 的 max。
-	std::vector<XFoam_Label> surfMaxLevel(nSurf, 0);
-	for (XFoam_Label si = 0; si < nSurf; ++si)
-	{
-		surfMaxLevel[si] = std::min<XFoam_Label>(surfaces_[si].maxLevel,
-		                                         static_cast<XFoam_Label>(LEVEL_CAP));
-	}
-	oct.refineByPredicate(
-		static_cast<XFoam_Label>(targetLevel),
-		[&](const Leaf& l) -> bool {
-			const XFoam_BoundBox bb = leafBBox(l);
-			for (XFoam_Label si = 0; si < nSurf; ++si)
-			{
-				if (!stls[si] || stls[si]->empty()) continue;
-				if (l.level >= surfMaxLevel[si]) continue;
-				if (stls[si]->boxIntersects(bb)) return true;
-			}
-			return false;
-		});
-
-	// ----- 4. Phase 1.5: nCellsBetweenLevels buffer 膨胀 -----
-	// OF 语义：nCellsBetweenLevels=N → 相邻不同 level 间至少 N 个中间 level cell。
-	// balance21() 自带 1 个中间 cell；外扩 (N-1) 圈把高 level 区域沿 face 邻居向粗侧膨胀。
-	const int nBufferLayers = std::max(0, static_cast<int>(refine_.nCellsBetweenLevels) - 1);
-	if (nBufferLayers > 0)
-	{
-		oct.extendHighLevel(nBufferLayers);
-	}
-
-	// ----- 4'. Phase 2: 2:1 face-balance -----
-	oct.balance21();
-
-	// ----- 5. 统计 per-level cell 数 -----
-	oct.perLevelCounts(stats.perLevelCells);
-	stats.maxAdaptiveLevel = oct.maxLevelReached();
-	stats.nRefinedCells = oct.numLeaves();
-
-	// ----- 6. STL 切除：用 leaf 中心做 inside/outside 判定 -----
-	// pred=true 表示需要被切除；"切除" 的语义 = 与 locationInMesh 不同侧。
-	// "inside" 对多 surface 取 OR：任何一个 STL contains 即视为 inside
-	// (适合 STL 是封闭 obstacle 的并集；不适合 region 隔离需求，未来 #8 处理)。
 	auto insideAny = [&](const XFoam_Vector3D& p) -> bool {
 		for (XFoam_Label si = 0; si < nSurf; ++si)
 		{
@@ -670,21 +666,66 @@ bool XFoam_SnappyHexMesh::run(
 		return false;
 	};
 	const bool locInside = insideAny(refine_.locationInMesh);
-	oct.cullByPredicate(
-		[&](const Leaf& l) -> bool {
-			return insideAny(leafCentroidWorld(l)) != locInside;
-		});
 
-	// ----- 7. kept leaves 编 globalId -----
-	stats.nKeptCells = oct.assignCellIds();
+	const int nBufferLayers = std::max(0, static_cast<int>(refine_.nCellsBetweenLevels) - 1);
 
-	std::vector<Leaf>& leaves = oct.leaves();
+	// ----- 2.x 每 block 走完 refine → buffer → balance → cull → assignCellIds -----
+	stats.nRefinedCells = 0;
+	stats.nKeptCells = 0;
+	stats.maxAdaptiveLevel = 0;
+	for (int L = 0; L < 8; ++L) stats.perLevelCells[L] = 0;
+	for (XFoam_Label bi = 0; bi < nBlocks; ++bi)
+	{
+		BlockData& B = blocks[static_cast<size_t>(bi)];
+		XFoam_Hex8Ref& oct = octs[static_cast<size_t>(bi)];
 
-	// ----- 8. 全局点表 + addPoint -----
+		oct.refineByPredicate(
+			static_cast<XFoam_Label>(targetLevel),
+			[&](const Leaf& l) -> bool {
+				const XFoam_BoundBox bb = leafBBoxB(B, l);
+				for (XFoam_Label si = 0; si < nSurf; ++si)
+				{
+					if (!stls[si] || stls[si]->empty()) continue;
+					if (l.level >= surfMaxLevel[si]) continue;
+					if (stls[si]->boxIntersects(bb)) return true;
+				}
+				return false;
+			});
+		if (nBufferLayers > 0) oct.extendHighLevel(nBufferLayers);
+		oct.balance21();
+
+		XFoam_Label pl[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+		oct.perLevelCounts(pl);
+		for (int L = 0; L < 8; ++L) stats.perLevelCells[L] += pl[L];
+		stats.maxAdaptiveLevel = std::max(stats.maxAdaptiveLevel, oct.maxLevelReached());
+		stats.nRefinedCells += oct.numLeaves();
+
+		oct.cullByPredicate(
+			[&](const Leaf& l) -> bool {
+				return insideAny(leafCentroidWorldB(B, l)) != locInside;
+			});
+
+		const XFoam_Label kept = oct.assignCellIds();
+		B.cellIdOffset = stats.nKeptCells;
+		stats.nKeptCells += kept;
+		// 把 cellId 平移到全局编号
+		std::vector<Leaf>& lvs = oct.leaves();
+		for (size_t i = 0; i < lvs.size(); ++i)
+		{
+			if (lvs[i].cellId >= 0) lvs[i].cellId += B.cellIdOffset;
+		}
+	}
+
+	// ----- 8. 全局点表 + addPoint （跨 block 共用，自动 dedup 共享面顶点） -----
+	const XFoam_Label totalLeaves = [&]() {
+		XFoam_Label t = 0;
+		for (XFoam_Label bi = 0; bi < nBlocks; ++bi) t += octs[static_cast<size_t>(bi)].numLeaves();
+		return t;
+	}();
 	std::vector<XFoam_Vector3D> pts;
-	pts.reserve(leaves.size() * 8);
+	pts.reserve(static_cast<size_t>(totalLeaves) * 8);
 	std::unordered_map<PointKey, int, PointKeyHash> ptIdx;
-	ptIdx.reserve(leaves.size() * 8);
+	ptIdx.reserve(static_cast<size_t>(totalLeaves) * 8);
 	auto addPoint = [&](const XFoam_Vector3D& p) -> int {
 		PointKey k{
 			static_cast<int64_t>(std::llround(p.x() * invEps)),
@@ -699,13 +740,17 @@ bool XFoam_SnappyHexMesh::run(
 		return id;
 	};
 
-	// ----- 9. 给所有 leaf（kept 或不 kept）生成 8 个 corner 点 -----
-	// 不 kept 的也要做：粗侧 split-face 的 Steiner 点会被细侧（可能 kept 也可能不 kept）的
-	// corner 点 dedup 上；如果不生成，dedup 链不全。
-	for (Leaf& l : leaves)
+	// ----- 9. 给所有 block 的所有 leaf 生成 8 个 corner 点 -----
+	// 跨 block 的共享面顶点位置一致 → addPoint 自然 dedup。
+	for (XFoam_Label bi = 0; bi < nBlocks; ++bi)
 	{
-		XFoam_Vector3D c[8]; leafCornersWorld(l, c);
-		for (int oc = 0; oc < 8; ++oc) l.corner[oc] = addPoint(c[oc]);
+		BlockData& B = blocks[static_cast<size_t>(bi)];
+		std::vector<Leaf>& lvs = octs[static_cast<size_t>(bi)].leaves();
+		for (Leaf& l : lvs)
+		{
+			XFoam_Vector3D c[8]; leafCornersWorldB(B, l, c);
+			for (int oc = 0; oc < 8; ++oc) l.corner[oc] = addPoint(c[oc]);
+		}
 	}
 
 	// ----- 10. Face emit -----
@@ -718,8 +763,8 @@ bool XFoam_SnappyHexMesh::run(
 	};
 	std::vector<FInfo> finalFaces;
 	std::unordered_map<FaceKey, int, FaceKeyHash> faceIdx;
-	finalFaces.reserve(leaves.size() * 6);
-	faceIdx.reserve(leaves.size() * 6);
+	finalFaces.reserve(static_cast<size_t>(totalLeaves) * 6);
+	faceIdx.reserve(static_cast<size_t>(totalLeaves) * 6);
 
 	// emit 任意 N 边形（N >= 3）；用排序顶点集做 dedup。第二次遇到时按 OF 约定
 	// 设小 cellId 为 owner，并反转 verts 让法向从 owner → neighbour。
@@ -761,10 +806,10 @@ bool XFoam_SnappyHexMesh::run(
 
 	// 在 leaf l 的 face d 上，按 (rr, cc) ∈ {0..2}^2 取 L+1 分辨率的 face 9 点之一。
 	// 几何位置由 Hex8Ref 给出 (u, v, w)，本侧再 paramToWorld + addPoint 走 dedup。
-	auto faceFinePoint = [&](const Leaf& l, int d, int rr, int cc) -> int {
+	auto faceFinePointB = [&](const BlockData& B, const Leaf& l, int d, int rr, int cc) -> int {
 		XFoam_Scalar u, v, w;
 		XFoam_Hex8Ref::faceSteinerParam(l, d, rr, cc, u, v, w);
-		const XFoam_Vector3D p = paramToWorld(blockCorner, Nx, Ny, Nz, l.ai, l.aj, l.ak, u, v, w);
+		const XFoam_Vector3D p = paramToWorld(B.corner, B.Nx, B.Ny, B.Nz, l.ai, l.aj, l.ak, u, v, w);
 		return addPoint(p);
 	};
 
@@ -786,19 +831,25 @@ bool XFoam_SnappyHexMesh::run(
 	// ----- 10a. 预 pass：把所有 split face 的 9 个 Steiner 点先 addPoint 进 ptIdx -----
 	// 这样后面任何 cell emit 自己的"非 split 面"时，midPointId 都能查到边中点。
 	// 不在这里 emit 任何 face；只 populate 点表。
-	for (size_t s = 0; s < leaves.size(); ++s)
+	for (XFoam_Label bi = 0; bi < nBlocks; ++bi)
 	{
-		const Leaf& l = leaves[s];
-		if (!l.kept) continue;
-		for (int d = 0; d < 6; ++d)
+		const BlockData& B = blocks[static_cast<size_t>(bi)];
+		const XFoam_Hex8Ref& oct = octs[static_cast<size_t>(bi)];
+		const std::vector<Leaf>& lvs = oct.leaves();
+		for (size_t s = 0; s < lvs.size(); ++s)
 		{
-			const XFoam_Hex8Ref::FaceNbr nbr = oct.resolveFaceNeighbor(l, d);
-			if (nbr.kind != XFoam_Hex8Ref::FaceNbrKind::Finer) continue;
-			for (int rr = 0; rr < 3; ++rr)
+			const Leaf& l = lvs[s];
+			if (!l.kept) continue;
+			for (int d = 0; d < 6; ++d)
 			{
-				for (int cc = 0; cc < 3; ++cc)
+				const XFoam_Hex8Ref::FaceNbr nbr = oct.resolveFaceNeighbor(l, d);
+				if (nbr.kind != XFoam_Hex8Ref::FaceNbrKind::Finer) continue;
+				for (int rr = 0; rr < 3; ++rr)
 				{
-					(void)faceFinePoint(l, d, rr, cc);
+					for (int cc = 0; cc < 3; ++cc)
+					{
+						(void)faceFinePointB(B, l, d, rr, cc);
+					}
 				}
 			}
 		}
@@ -808,99 +859,103 @@ bool XFoam_SnappyHexMesh::run(
 	//   +axA × +axB；对 d=0/3/4 与 outward 法向相反，需翻转，否则负体积。
 	static const bool kFlipSub[6] = {true, false, false, true, true, false};
 
-	// ----- 10b. 正式 emit -----
-	for (size_t s = 0; s < leaves.size(); ++s)
+	// ----- 10b. 正式 emit （所有 block） -----
+	// 跨 block 的共享面：A 的边界 leaf 在某 d 方向是 OutOfGrid（block 内意义），但 B 同位置
+	// 的 leaf 会 emit 对应的同顶点集 face；emitFace dedup 自动把 fromGridBoundary 清掉，face
+	// 进入 internal 集合。
+	for (XFoam_Label bi = 0; bi < nBlocks; ++bi)
 	{
-		const Leaf& l = leaves[s];
-		if (!l.kept) continue;
-		bool isPoly = false;
-
-		for (int d = 0; d < 6; ++d)
+		const BlockData& B = blocks[static_cast<size_t>(bi)];
+		const XFoam_Hex8Ref& oct = octs[static_cast<size_t>(bi)];
+		const std::vector<Leaf>& lvs = oct.leaves();
+		for (size_t s = 0; s < lvs.size(); ++s)
 		{
-			const XFoam_Hex8Ref::FaceNbr nbr = oct.resolveFaceNeighbor(l, d);
+			const Leaf& l = lvs[s];
+			if (!l.kept) continue;
+			bool isPoly = false;
 
-			if (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::Finer)
+			for (int d = 0; d < 6; ++d)
 			{
-				// 我是粗侧：切 2x2 sub-quad。
-				int pgrid[3][3];
-				for (int rr = 0; rr < 3; ++rr)
+				const XFoam_Hex8Ref::FaceNbr nbr = oct.resolveFaceNeighbor(l, d);
+
+				if (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::Finer)
 				{
-					for (int cc = 0; cc < 3; ++cc)
+					int pgrid[3][3];
+					for (int rr = 0; rr < 3; ++rr)
 					{
-						pgrid[rr][cc] = faceFinePoint(l, d, rr, cc);
+						for (int cc = 0; cc < 3; ++cc)
+						{
+							pgrid[rr][cc] = faceFinePointB(B, l, d, rr, cc);
+						}
 					}
-				}
-				const bool flipSub = kFlipSub[d];
-				for (int rr = 0; rr < 2; ++rr)
-				{
-					for (int cc = 0; cc < 2; ++cc)
+					const bool flipSub = kFlipSub[d];
+					for (int rr = 0; rr < 2; ++rr)
 					{
-						int q[4];
-						if (flipSub)
+						for (int cc = 0; cc < 2; ++cc)
 						{
-							q[0] = pgrid[rr][cc];
-							q[1] = pgrid[rr + 1][cc];
-							q[2] = pgrid[rr + 1][cc + 1];
-							q[3] = pgrid[rr][cc + 1];
-						}
-						else
-						{
-							q[0] = pgrid[rr][cc];
-							q[1] = pgrid[rr][cc + 1];
-							q[2] = pgrid[rr + 1][cc + 1];
-							q[3] = pgrid[rr + 1][cc];
-						}
-						// sub-quad 的 4 条边可能也有更深层 (L+2 等) 的中点；同样要
-						// 与对侧 fine cell 的 polygon emit 对齐，否则 dedup 失败。
-						std::vector<int> sq;
-						sq.reserve(8);
-						for (int i = 0; i < 4; ++i)
-						{
-							const int vA = q[i];
-							const int vB = q[(i + 1) % 4];
-							sq.push_back(vA);
-							const int mid = midPointId(vA, vB);
-							if (mid >= 0 && mid != vA && mid != vB)
+							int q[4];
+							if (flipSub)
 							{
-								sq.push_back(mid);
+								q[0] = pgrid[rr][cc];
+								q[1] = pgrid[rr + 1][cc];
+								q[2] = pgrid[rr + 1][cc + 1];
+								q[3] = pgrid[rr][cc + 1];
 							}
+							else
+							{
+								q[0] = pgrid[rr][cc];
+								q[1] = pgrid[rr][cc + 1];
+								q[2] = pgrid[rr + 1][cc + 1];
+								q[3] = pgrid[rr + 1][cc];
+							}
+							std::vector<int> sq;
+							sq.reserve(8);
+							for (int i = 0; i < 4; ++i)
+							{
+								const int vA = q[i];
+								const int vB = q[(i + 1) % 4];
+								sq.push_back(vA);
+								const int mid = midPointId(vA, vB);
+								if (mid >= 0 && mid != vA && mid != vB)
+								{
+									sq.push_back(mid);
+								}
+							}
+							emitFace(sq, l.cellId, false);
+							++stats.nSplitFaces;
 						}
-						emitFace(sq, l.cellId, false);
-						++stats.nSplitFaces;
+					}
+					isPoly = true;
+					continue;
+				}
+
+				const int* fv = kHexFace[d];
+				std::vector<int> verts;
+				verts.reserve(8);
+				for (int i = 0; i < 4; ++i)
+				{
+					const int vA = l.corner[fv[i]];
+					const int vB = l.corner[fv[(i + 1) % 4]];
+					verts.push_back(vA);
+					const int mid = midPointId(vA, vB);
+					if (mid >= 0 && mid != vA && mid != vB)
+					{
+						verts.push_back(mid);
+						isPoly = true;
 					}
 				}
-				isPoly = true;
-				continue;
-			}
 
-			// 非 split face：可能仍是 polygon — 若 hex 角点连边的中点被别的 cell split
-			// 时 addPoint 过，则插入该中点。最多 4 个边 → 最多多插 4 个点 → polygon 最大 8 边。
-			const int* fv = kHexFace[d];
-			std::vector<int> verts;
-			verts.reserve(8);
-			for (int i = 0; i < 4; ++i)
-			{
-				const int vA = l.corner[fv[i]];
-				const int vB = l.corner[fv[(i + 1) % 4]];
-				verts.push_back(vA);
-				const int mid = midPointId(vA, vB);
-				if (mid >= 0 && mid != vA && mid != vB)
+				const bool onGridBoundary = (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::OutOfGrid);
+				if (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::None)
 				{
-					verts.push_back(mid);
-					isPoly = true;
+					std::cerr << "snappy: WARNING: leaf (" << l.ai << "," << l.aj << "," << l.ak
+					          << ", L=" << l.level << ") face d=" << d
+					          << " has no neighbor leaf in any level. Emitting as boundary.\n";
 				}
+				emitFace(verts, l.cellId, onGridBoundary);
 			}
-
-			const bool onGridBoundary = (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::OutOfGrid);
-			if (nbr.kind == XFoam_Hex8Ref::FaceNbrKind::None)
-			{
-				std::cerr << "snappy: WARNING: leaf (" << l.ai << "," << l.aj << "," << l.ak
-				          << ", L=" << l.level << ") face d=" << d
-				          << " has no neighbor leaf in any level. Emitting as boundary.\n";
-			}
-			emitFace(verts, l.cellId, onGridBoundary);
+			if (isPoly) ++stats.nPolyhedralCells;
 		}
-		if (isPoly) ++stats.nPolyhedralCells;
 	}
 
 	// ----- 7. 把 faces 切成 internal / boundary, 给 boundary 分 patch -----
