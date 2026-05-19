@@ -3,19 +3,16 @@
 #include "XFoam/utilities/xfoam_error.h"
 #include "XFoam/utilities/xfoam_fileoperation.h"
 #include "XFoam/utilities/xfoam_time.h"
+#include <boost/filesystem.hpp>
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <limits>
 #include <string>
 
-#if defined(_MSC_VER) && _MSC_VER < 1920
-#include <experimental/filesystem>
-namespace xfoam_fs = std::experimental::filesystem;
-#else
-#include <filesystem>
-namespace xfoam_fs = std::filesystem;
-#endif
+// 项目强制 C++11，std::filesystem (C++17) 与 experimental 路径均不可用；
+// XFoam 已经依赖 boost::filesystem（见 xfoam_types.cpp），此处统一走 boost。
+namespace xfoam_fs = boost::filesystem;
 
 #pragma push_macro("toc")
 #undef toc

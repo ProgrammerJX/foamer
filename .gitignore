@@ -1,2 +1,46 @@
 # 临时文件
 tmp/
+
+# CMake build trees
+build/
+build-*/
+out/
+cmake-build-*/
+_deps/
+
+# CMake artifacts (top-level)
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CMakeUserPresets.json
+
+# Compiled outputs
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.idb
+
+# IDE
+.vs/
+.vscode/
+.idea/
+.qtc_clangd/
+*.suo
+*.user
+*.code-workspace
+
+# OS junk
+Thumbs.db
+.DS_Store
+desktop.ini

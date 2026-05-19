@@ -8,8 +8,10 @@
 // XFoam_HashSet：参考 OpenFOAM Foam::HashSet（HashSet.H），底层为 std::unordered_set。
 // XFoam_Map：参考 OpenFOAM Foam::Map（Map.H），即 XFoam_Label 键的 HashTable。
 // 迭代器语义接近 OF（operator* / operator() 为 T&，key() 为键）。
+// 模板成员内构造/抛出 XFoam_Error，比照 xfoam_autoptr.h 在 xfoam_types.h 之后立即包含 xfoam_error.h（foam_code.md 第 3 条）。
 
 #include "XFoam/utilities/xfoam_types.h"
+#include "XFoam/utilities/xfoam_error.h"
 
 XFoam_API unsigned XFoam_hashBytes(const void* data, XFoam_Size len, unsigned seed = 0);
 
