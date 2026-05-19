@@ -40,3 +40,4 @@ endfunction()
 
 xfoam_add_test_executable(foam-core)
 xfoam_add_test_executable(foam-mesh)
+xfoam_add_test_executable(foam-snap)

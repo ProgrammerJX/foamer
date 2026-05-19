@@ -43,7 +43,13 @@ bool XFoam_LayerParameters::readDict(const XFoam_Dictionary& dict)
 	pickInt("nRelaxedIter", nRelaxedIter);
 
 	// layers { patchName { nSurfaceLayers N; } } 子段，无 wordRe 通配。
-	const XFoam_Dictionary* layersSub = dict.subDictPtr(XFoam_Word("layers"));
+	// 走 lookupEntryPtr + isDict 守护：XFoam_Dictionary::subDictPtr 对 primitive entry
+	// 会抛 "Attempt to return primitive entry as a sub-dictionary"。
+	auto safeSub = [](const XFoam_Dictionary& d, const XFoam_Word& k) -> const XFoam_Dictionary* {
+		const XFoam_Entry* e = d.lookupEntryPtr(k, false, true);
+		return (e && e->isDict()) ? &e->dict() : nullptr;
+	};
+	const XFoam_Dictionary* layersSub = safeSub(dict, XFoam_Word("layers"));
 	perPatchLayers.clear();
 	if (layersSub)
 	{
@@ -52,7 +58,7 @@ bool XFoam_LayerParameters::readDict(const XFoam_Dictionary& dict)
 		for (XFoam_Label i = 0; i < keys.size(); ++i)
 		{
 			const XFoam_Word& patchName = keys[i];
-			const XFoam_Dictionary* pp = layersSub->subDictPtr(patchName);
+			const XFoam_Dictionary* pp = safeSub(*layersSub, patchName);
 			if (!pp) continue;
 			XFoam_Label n = 0;
 			if (pp->readIfPresent(XFoam_Word("nSurfaceLayers"), n))
