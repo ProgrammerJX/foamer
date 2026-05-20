@@ -45,6 +45,7 @@ struct Args
 	double       mapRelax   = 1.0;
 	bool         snapFeatures = false;
 	double       featureSearchRadius = 0; ///< 0 = auto
+	bool         perFacePatches = false;
 
 	/// 命令行多次指定的 object refines
 	struct BoxR    { double xmn, ymn, zmn, xmx, ymx, zmx; int level; };
@@ -89,6 +90,7 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-mapRelax")   == 0) { if (!next(a.mapRelax))  return false; }
 		else if (std::strcmp(arg, "-snapFeatures") == 0) { a.snapFeatures = true; }
 		else if (std::strcmp(arg, "-featureSearchRadius") == 0) { if (!next(a.featureSearchRadius)) return false; }
+		else if (std::strcmp(arg, "-perFacePatches") == 0) { a.perFacePatches = true; }
 		else if (std::strcmp(arg, "-refineBox") == 0)
 		{
 			Args::BoxR b;
@@ -256,7 +258,15 @@ int main(int argc, char** argv)
 			ep.keepInside = true;
 			ep.keepData   = true;
 			ep.keepOutside = false;
-			XFoam_CMshCartesianExtractor ex(oct(), ep);
+			ep.perFacePatches = A.perFacePatches;
+			std::vector<const XFoam_BrepBase*> brepsForExtract;
+			std::vector<std::string>            brepNamesForExtract;
+			if (ep.perFacePatches)
+			{
+				brepsForExtract.push_back(&brep);
+				brepNamesForExtract.push_back("surface");
+			}
+			XFoam_CMshCartesianExtractor ex(oct(), ep, brepsForExtract, brepNamesForExtract);
 			XFoam_CMshPolyMeshGen pm;
 			std::cout << "extracting polyMesh (balance21 + face dedup)..." << std::endl;
 			const auto t2 = std::chrono::steady_clock::now();

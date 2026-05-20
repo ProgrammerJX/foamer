@@ -7,6 +7,8 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -74,9 +76,20 @@ struct FaceKeyHash
 } // namespace
 
 XFoam_CMshCartesianExtractor::XFoam_CMshCartesianExtractor(
-	XFoam_CMshOctree& oct, const Params& p)
-	: oct_(oct), p_(p)
-{}
+	XFoam_CMshOctree& oct,
+	const Params& p,
+	std::vector<const XFoam_BrepBase*> breps,
+	std::vector<std::string> brepNames)
+	: oct_(oct)
+	, p_(p)
+	, breps_(std::move(breps))
+	, brepNames_(std::move(brepNames))
+{
+	while (brepNames_.size() < breps_.size())
+	{
+		brepNames_.push_back("brep" + std::to_string(brepNames_.size()));
+	}
+}
 
 bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 {
@@ -179,8 +192,9 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 	struct RawFace
 	{
 		std::array<int, 4> verts; // 原始 CCW 序（owner→neighbour 方向）
-		int owner    = -1;
+		int owner     = -1;
 		int neighbour = -1;
+		int patchKey  = 0;        // boundary only：(brepIdx << 16) | subPatchId+1；0 = default
 	};
 	std::vector<RawFace> raw;
 	raw.reserve(cells.size() * 3);
@@ -313,7 +327,7 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 	}
 
 	// 6) 把 raw faces 重新排：先所有 internal（按 (owner, neighbour) 升序），
-	//    再所有 boundary（按 owner 升序）。owner / neighbour 一并填好。
+	//    再所有 boundary（按 patchKey 升序 → owner 升序）。
 	std::vector<int> internalIdx, boundaryIdx;
 	internalIdx.reserve(raw.size());
 	boundaryIdx.reserve(raw.size());
@@ -322,13 +336,45 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 		if (raw[i].neighbour >= 0) internalIdx.push_back(static_cast<int>(i));
 		else                       boundaryIdx.push_back(static_cast<int>(i));
 	}
+
+	// 6a) 给 boundary face 打 patchKey
+	if (p_.perFacePatches && !breps_.empty())
+	{
+		for (int rfi : boundaryIdx)
+		{
+			RawFace& rf = raw[static_cast<std::size_t>(rfi)];
+			// 面 centroid
+			XFoam_Vector3D c(0, 0, 0);
+			for (int vi : rf.verts) c += out.points[static_cast<std::size_t>(vi)];
+			c *= static_cast<XFoam_Scalar>(0.25);
+
+			// 选最近 brep（按 distance）
+			int          bestBrep = 0;
+			XFoam_Scalar bestD    = std::numeric_limits<XFoam_Scalar>::infinity();
+			for (std::size_t bi = 0; bi < breps_.size(); ++bi)
+			{
+				if (!breps_[bi] || breps_[bi]->empty()) continue;
+				const XFoam_Scalar d = breps_[bi]->distance(c);
+				if (d < bestD) { bestD = d; bestBrep = static_cast<int>(bi); }
+			}
+			const auto* brep = breps_[static_cast<std::size_t>(bestBrep)];
+			XFoam_Label sub = -1;
+			if (brep && !brep->empty()) sub = brep->closestSubPatchId(c);
+			// 0 留给 default；真实 patchKey = (brepIdx << 16) | (sub + 1)
+			rf.patchKey = (bestBrep << 16) | (static_cast<int>(sub + 1));
+		}
+	}
+
 	std::sort(internalIdx.begin(), internalIdx.end(),
 		[&](int a, int b) {
 			if (raw[a].owner != raw[b].owner) return raw[a].owner < raw[b].owner;
 			return raw[a].neighbour < raw[b].neighbour;
 		});
 	std::sort(boundaryIdx.begin(), boundaryIdx.end(),
-		[&](int a, int b) { return raw[a].owner < raw[b].owner; });
+		[&](int a, int b) {
+			if (raw[a].patchKey != raw[b].patchKey) return raw[a].patchKey < raw[b].patchKey;
+			return raw[a].owner < raw[b].owner;
+		});
 
 	out.faces.reserve(raw.size());
 	out.owner.reserve(raw.size());
@@ -351,12 +397,59 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 		out.owner.push_back(raw[rfi].owner);
 	}
 
-	XFoam_CMshPolyMeshGen::Patch P;
-	P.name      = p_.defaultPatchName;
-	P.type      = p_.defaultPatchType;
-	P.startFace = startBoundary;
-	P.nFaces    = static_cast<int>(out.faces.size()) - startBoundary;
-	out.patches.push_back(std::move(P));
+	// 6b) 按 patchKey 拼出 patches
+	if (p_.perFacePatches && !breps_.empty())
+	{
+		int i = 0;
+		const int nb = static_cast<int>(boundaryIdx.size());
+		while (i < nb)
+		{
+			int j = i;
+			const int curKey = raw[boundaryIdx[static_cast<std::size_t>(i)]].patchKey;
+			while (j < nb && raw[boundaryIdx[static_cast<std::size_t>(j)]].patchKey == curKey) ++j;
+
+			const int brepIdx = curKey >> 16;
+			const int subId1  = curKey & 0xFFFF;      // = subId + 1
+			const int subId   = subId1 - 1;
+
+			XFoam_CMshPolyMeshGen::Patch P;
+			std::string subName;
+			if (subId >= 0 && brepIdx >= 0 && brepIdx < static_cast<int>(breps_.size()))
+			{
+				const auto* brep = breps_[static_cast<std::size_t>(brepIdx)];
+				if (brep)
+				{
+					const XFoam_String sn = brep->subPatchName(static_cast<XFoam_Label>(subId));
+					subName = static_cast<const std::string&>(sn);
+				}
+			}
+			if (subName.empty()) subName = "sub" + std::to_string(subId < 0 ? 0 : subId);
+			std::string name;
+			if (breps_.size() > 1)
+			{
+				name = brepNames_[static_cast<std::size_t>(brepIdx)] + "_" + subName;
+			}
+			else
+			{
+				name = subName;
+			}
+			P.name      = name;
+			P.type      = p_.defaultPatchType;
+			P.startFace = startBoundary + i;
+			P.nFaces    = j - i;
+			out.patches.push_back(std::move(P));
+			i = j;
+		}
+	}
+	else
+	{
+		XFoam_CMshPolyMeshGen::Patch P;
+		P.name      = p_.defaultPatchName;
+		P.type      = p_.defaultPatchType;
+		P.startFace = startBoundary;
+		P.nFaces    = static_cast<int>(out.faces.size()) - startBoundary;
+		out.patches.push_back(std::move(P));
+	}
 
 	return true;
 }
