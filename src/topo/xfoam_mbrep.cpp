@@ -7,6 +7,7 @@
 #ifdef XFOAM_WITH_OCCT
 // 只有 OCCT ON 时才拉 OCCT 头文件，避免 OFF 模式下 ninja 也得扫上百个 .hxx。
 // 这里集中 include；公有头 xfoam_mbrep.h 一行 OCCT 都不暴露（pImpl 隔离）。
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
@@ -861,13 +862,19 @@ XFoam_BrepBase::FeatureKind XFoam_MBrep::closestFeature(
 	outTangent = XFoam_Vector3D(0, 0, 0);
 	if (featureEdgeIdx_.empty() && featureVertIdx_.empty()) return FeatureKind::None;
 
+#ifdef XFOAM_WITH_OCCT
 	const XFoam_Scalar r2 = searchRadius * searchRadius;
 	XFoam_Scalar bestD2 = r2;
 	FeatureKind bestKind = FeatureKind::None;
 	XFoam_Vector3D bestQ;
+	// 粗筛胜出 edge 在 edges_ / occt_().edgeMap 里的下标；后面 OCCT 精化要用。
 	XFoam_Label bestEdgeArrayIdx = -1;
+	// 粗筛切向（离散 chord 方向）；精化失败时作为 fallback。
+	XFoam_Vector3D bestSegTangent(0, 0, 0);
 
-	// vertex 优先
+	// ---- 阶段 1：vertex 直接比距离 ----
+	// feature vertex 的几何已经是 OCCT TopoDS_Vertex 的精确点（verts_[vi].p
+	// 是 BRep_Tool::Pnt(...) 转出来的），不需要 OCCT 精化。
 	for (size_t i = 0; i < featureVertIdx_.size(); ++i)
 	{
 		const XFoam_Label vi = featureVertIdx_[i];
@@ -882,9 +889,11 @@ XFoam_BrepBase::FeatureKind XFoam_MBrep::closestFeature(
 			bestQ    = fp;
 		}
 	}
-	// edge：用 ParametricEdge.sampled（OCCT 离散）做点到 polyline 距离。这里
-	// 没用 OCCT 的 BRepExtrema 是因为 feature edge 数典型 ~10-100，逐 segment
-	// 扫描的常数因子远小于 OCCT 一次 BRepExtrema 调用的开销。
+
+	// ---- 阶段 2：edge 粗筛 ----
+	// 在 ParametricEdge.sampled（弦高离散 polyline）上做点到 segment 距离。
+	// feature edge 总数典型 ~10-10²，逐 segment 扫描的常数远小于 OCCT
+	// BRepExtrema_DistShapeShape 一次调用 → 用它做粗筛（O(N_seg)）。
 	for (size_t i = 0; i < featureEdgeIdx_.size(); ++i)
 	{
 		const XFoam_Label ei = featureEdgeIdx_[i];
@@ -917,22 +926,80 @@ XFoam_BrepBase::FeatureKind XFoam_MBrep::closestFeature(
 				bestKind = FeatureKind::Edge;
 				bestQ  = q;
 				bestEdgeArrayIdx = ei;
-				// 切向：当前段方向。比拿端点端点向量更稳。
 				const XFoam_Scalar m = std::sqrt(abLen2);
 				if (m > 0)
 				{
 					const XFoam_Scalar inv = static_cast<XFoam_Scalar>(1) / m;
-					outTangent = XFoam_Vector3D(ab.x() * inv, ab.y() * inv, ab.z() * inv);
-				}
-				else
-				{
-					outTangent = XFoam_Vector3D(0, 0, 0);
+					bestSegTangent = XFoam_Vector3D(
+						ab.x() * inv, ab.y() * inv, ab.z() * inv);
 				}
 			}
 		}
 	}
-	(void)bestEdgeArrayIdx; // 备查
+
+	// ---- 阶段 3：胜出 edge 上做 OCCT 精化 ----
+	// 离散粗筛给出的 closest 点最坏在 chord 上，误差 ~ chord 高（= sampler 弦高
+	// 1e-2 量级，对 CAD 是 mm 量级的 10⁻²）；切向只是 chord 方向，曲线弯曲处偏。
+	// 这里对胜出的那一条 TopoDS_Edge 调一次 BRepExtrema_DistShapeShape：
+	//   * PointOnShape2(1) → 精确最近点（数值精度 ~10⁻¹⁴）
+	//   * ParOnEdgeS2(1, u) → 拿到曲线参数 u
+	//   * BRepAdaptor_Curve.D1(u, P, V) → 真实曲线切向（不是 chord 方向）
+	// 一条 edge 一次调用 → O(1) 开销，换 ~10⁸× 精度提升 + 切向正确。
+	if (bestKind == FeatureKind::Edge
+		&& bestEdgeArrayIdx >= 0
+		&& !occt_().rootShape.IsNull())
+	{
+		const Standard_Integer occtKey =
+			static_cast<Standard_Integer>(bestEdgeArrayIdx + 1);
+		bool refined = false;
+		if (occtKey >= 1 && occtKey <= occt_().edgeMap.Extent())
+		{
+			try
+			{
+				const TopoDS_Edge& e = TopoDS::Edge(
+					occt_().edgeMap.FindKey(occtKey));
+				const TopoDS_Vertex vp = BRepBuilderAPI_MakeVertex(toOccPnt(p));
+				BRepExtrema_DistShapeShape extr(vp, e);
+				extr.Perform();
+				if (extr.IsDone() && extr.NbSolution() >= 1)
+				{
+					const gp_Pnt q = extr.PointOnShape2(1);
+					bestQ = fromOccPnt(q);
+
+					Standard_Real u = 0;
+					extr.ParOnEdgeS2(1, u);
+					BRepAdaptor_Curve bac(e);
+					gp_Pnt pp;
+					gp_Vec dv;
+					bac.D1(u, pp, dv);
+					const Standard_Real m = dv.Magnitude();
+					if (m > 1.0e-14)
+					{
+						dv.Divide(m);
+						if (e.Orientation() == TopAbs_REVERSED) dv.Reverse();
+						bestSegTangent = XFoam_Vector3D(
+							static_cast<XFoam_Scalar>(dv.X()),
+							static_cast<XFoam_Scalar>(dv.Y()),
+							static_cast<XFoam_Scalar>(dv.Z()));
+					}
+					refined = true;
+				}
+			}
+			catch (const Standard_Failure&)
+			{
+				// OCCT 偶尔在退化曲线 / 自相交段会抛；保留粗筛结果即可。
+			}
+		}
+		(void)refined;
+	}
+
 	if (bestKind != FeatureKind::None) outClosest = bestQ;
-	if (bestKind != FeatureKind::Edge) outTangent = XFoam_Vector3D(0, 0, 0);
+	if (bestKind == FeatureKind::Edge)  outTangent = bestSegTangent;
 	return bestKind;
+#else
+	(void)p;
+	(void)searchRadius;
+	(void)outClosest;
+	return FeatureKind::None;
+#endif
 }
