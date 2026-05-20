@@ -178,6 +178,39 @@ private:
 
 	void ensureBboxCache() const;
 	void invalidateBboxCache() const { bboxCacheBuilt_ = false; }
+
+	// =========================================================================
+	// closestPointAndNormal 查询代理：内置 VBrep。
+	//
+	// 动机：直接走 BRepExtrema_DistShapeShape 对 1000+ face 的 assembly 每次
+	// 查询要 ~ms（0.step 76s wall time 主要花在这）。把 MBrep tessellate 一遍
+	// 烘成 VBrep，BVH-based closest-point 走离散三角面就够 µs 量级。
+	//
+	// 取舍：position 误差 ≈ queryDeflection_（默认 = bbox 对角 × 1e-3），normal
+	// 是 tri-flat normal（vs OCCT analytic normal 的 sub-degree）。对 snap 收敛
+	// 完全够用 —— snap 把点投到 closest，position 精度 = deflection ≪ cell
+	// size；normal 仅供 snap 内层方向判定，flat normal 不影响最终几何。
+	//
+	// 真正需要 OCCT 解析精度的场景：closestFeature（仍然两阶段 sampled+OCCT
+	// refine）；contains（SolidClassifier，解析）；boxIntersects（per-face bbox，
+	// OCCT 算 bbox）。这三个保持 OCCT 后端不变。
+	// =========================================================================
+	mutable XFoam_AutoPtr<XFoam_VBrep> queryProxy_;
+	mutable bool                       proxyBuilt_ = false;
+	XFoam_Scalar                       queryDeflection_ = -1; ///< <0 = 自适应
+
+	void ensureQueryProxy() const;
+	void invalidateQueryProxy() const { proxyBuilt_ = false; }
+
+public:
+	/// closestPointAndNormal 用的离散弦高。<=0 → bbox 对角 × 1e-3 自适应；外部
+	/// 在需要更高精度 / 更快建表时手动设。值改动会让代理失效，下次查询重建。
+	void setQueryDeflection(XFoam_Scalar d)
+	{
+		queryDeflection_ = d;
+		invalidateQueryProxy();
+	}
+	XFoam_Scalar queryDeflection() const { return queryDeflection_; }
 };
 
 #endif // XFoam_MBrep_H_
