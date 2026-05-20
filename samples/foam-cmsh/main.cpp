@@ -42,6 +42,8 @@ struct Args
 	bool         snapFeatures = false;
 	double       featureSearchRadius = 0; ///< 0 = auto
 	bool         perFacePatches = false;
+	bool         fillAllSubPatches = false;
+	bool         noRepatch      = false;
 	bool         optimize       = false;
 	int          optIter        = 3;
 	double       optRelax       = 0.5;
@@ -98,6 +100,8 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-snapFeatures") == 0) { a.snapFeatures = true; }
 		else if (std::strcmp(arg, "-featureSearchRadius") == 0) { if (!next(a.featureSearchRadius)) return false; }
 		else if (std::strcmp(arg, "-perFacePatches") == 0) { a.perFacePatches = true; }
+		else if (std::strcmp(arg, "-fillAllSubPatches") == 0) { a.fillAllSubPatches = true; }
+		else if (std::strcmp(arg, "-noRepatch") == 0) { a.noRepatch = true; }
 		else if (std::strcmp(arg, "-optimize")  == 0) { a.optimize = true; }
 		else if (std::strcmp(arg, "-optIter")   == 0) { if (!nexti(a.optIter))  return false; }
 		else if (std::strcmp(arg, "-optRelax")  == 0) { if (!next(a.optRelax))  return false; }
@@ -222,6 +226,8 @@ int main(int argc, char** argv)
 		pp.fitFeaturesSafety       = static_cast<XFoam_Scalar>(A.fitFeatSafety);
 		pp.fitFeaturesMaxLevelBump = A.fitFeatBump;
 		pp.perFacePatches          = A.perFacePatches;
+		pp.fillAllSubPatches       = A.fillAllSubPatches;
+		pp.repatchAfterMap         = !A.noRepatch;
 		pp.useLocationInMesh       = A.useLocationInMesh;
 		pp.locationInMesh          = XFoam_Vector3D(A.lim[0], A.lim[1], A.lim[2]);
 		pp.enableMapper            = A.mapSurface;

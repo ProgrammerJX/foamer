@@ -22,6 +22,7 @@
 #include "XFoam/cmsh/xfoam_cmshmeshoptimizer.h"
 #include "XFoam/cmsh/xfoam_cmshobjrefine.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
+#include "XFoam/cmsh/xfoam_cmshrepatcher.h"
 #include "XFoam/cmsh/xfoam_cmshsurfaceedgeextractor.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_types.h"
@@ -63,6 +64,14 @@ public:
 		std::string  defaultPatchName        = "walls";
 		std::string  defaultPatchType        = "wall";
 
+		/// perFacePatches 下，是否输出未命中 sub-patch 的空 patch（防 TpFace 丢）
+		bool         fillAllSubPatches       = false;
+
+		/// perFacePatches 下，是否在 mapper（+ edgeSnap）之后用 post-mapped
+		/// centroid 重写 pm.patches（重新算 closestSubPatchId），把 extract 阶段
+		/// 因 face 还在整数 grid 上而错分的 TpFace 归属修正过来。
+		bool         repatchAfterMap         = true;
+
 		// ---- mapper ----
 		bool         enableMapper            = true;
 		int          mapIter                 = 1;
@@ -99,11 +108,13 @@ public:
 		XFoam_Label mapperMoved     = 0;
 		XFoam_CMshSurfaceEdgeExtractor::Stats edgeStats;
 		XFoam_CMshMeshOptimizer::Stats        optimizerStats;
+		XFoam_CMshRepatcher::Stats            repatchStats;
 		double msOctree     = 0;
 		double msExtract    = 0;
 		double msMapper     = 0;
 		double msEdge       = 0;
 		double msOptimizer  = 0;
+		double msRepatch    = 0;
 	};
 
 	explicit XFoam_CMshPipeline(const Params& p);

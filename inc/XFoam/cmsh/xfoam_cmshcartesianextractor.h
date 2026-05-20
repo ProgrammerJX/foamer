@@ -69,6 +69,11 @@ public:
 		bool useLocationInMesh = false;
 		XFoam_Vector3D locationInMesh = XFoam_Vector3D(0, 0, 0);
 
+		/// perFacePatches 下，是否为 brep 中未被任何 boundary face 命中的
+		/// sub-patch 也输出一个 nFaces=0 的空 patch（防止小 TpFace 在网格太
+		/// 粗时"消失"；与 snappyHexMesh 行为一致）。
+		bool fillAllSubPatches = false;
+
 		/// patch type 总缺省。已知 patch 名（"walls", "inlet", "outlet", ...）
 		/// 可考虑后续做 name → type 映射；MVP 一律用 defaultPatchType。
 	};

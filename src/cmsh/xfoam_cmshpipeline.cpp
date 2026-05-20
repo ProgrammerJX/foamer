@@ -3,6 +3,7 @@
 #include "XFoam/cmsh/xfoam_cmshcartesianextractor.h"
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
+#include "XFoam/cmsh/xfoam_cmshrepatcher.h"
 #include "XFoam/cmsh/xfoam_cmshsurfacemapper.h"
 #include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/utilities/xfoam_boundbox.h"
@@ -111,6 +112,7 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 	ep.locationInMesh    = p_.locationInMesh;
 	ep.defaultPatchName  = p_.defaultPatchName;
 	ep.defaultPatchType  = p_.defaultPatchType;
+	ep.fillAllSubPatches = p_.fillAllSubPatches;
 	XFoam_CMshCartesianExtractor ex(oct(), ep, &brep);
 
 	t0 = std::chrono::steady_clock::now();
@@ -220,10 +222,35 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		}
 	}
 
+	// === 6) repatch（perFacePatches 下，用 post-mapped centroid 重写 patches）===
+	if (p_.perFacePatches && p_.repatchAfterMap
+	    && (p_.enableMapper || p_.enableEdgeSnap || p_.enableOptimizer))
+	{
+		XFoam_CMshRepatcher::Params rp;
+		rp.defaultPatchType  = p_.defaultPatchType;
+		rp.fillAllSubPatches = p_.fillAllSubPatches;
+		rp.verbose           = p_.verbose;
+		XFoam_CMshRepatcher rep(pm, brep, rp);
+
+		t0 = std::chrono::steady_clock::now();
+		stats.repatchStats = rep.repatch();
+		t1 = std::chrono::steady_clock::now();
+		stats.msRepatch = ms(t0, t1);
+		stats.nPatches = static_cast<XFoam_Label>(pm.patches.size());
+		if (p_.verbose)
+		{
+			std::cout << "[cmsh pipeline] repatch done in " << stats.msRepatch
+			          << " ms (reassigned=" << stats.repatchStats.nReassigned
+			          << ", patches " << stats.repatchStats.nPatchesBefore
+			          << " -> " << stats.repatchStats.nPatchesAfter
+			          << ", empty added " << stats.repatchStats.nEmptyAdded << ")\n";
+		}
+	}
+
 	if (p_.verbose)
 	{
 		const double total = stats.msOctree + stats.msExtract + stats.msMapper
-		                   + stats.msEdge + stats.msOptimizer;
+		                   + stats.msEdge + stats.msOptimizer + stats.msRepatch;
 		std::cout << "[cmsh pipeline] total " << total << " ms\n";
 	}
 	return stats;

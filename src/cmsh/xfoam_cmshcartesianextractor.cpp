@@ -11,6 +11,7 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -448,6 +449,7 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 	// 6b) 按 patchKey 拼出 patches
 	if (p_.perFacePatches && brep_ && !brep_->empty())
 	{
+		std::unordered_set<int> hitSub;
 		int i = 0;
 		const int nb = static_cast<int>(boundaryIdx.size());
 		while (i < nb)
@@ -463,6 +465,7 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 			{
 				const XFoam_String sn = brep_->subPatchName(static_cast<XFoam_Label>(subId));
 				subName = static_cast<const std::string&>(sn);
+				hitSub.insert(subId);
 			}
 			if (subName.empty()) subName = "sub" + std::to_string(subId < 0 ? 0 : subId);
 			P.name      = subName;
@@ -471,6 +474,33 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 			P.nFaces    = j - i;
 			out.patches.push_back(std::move(P));
 			i = j;
+		}
+
+		// 6c) fillAllSubPatches：每个未被命中的 sub-patch 也写空 patch，保 TpFace 完整
+		if (p_.fillAllSubPatches)
+		{
+			const XFoam_Label nSub = brep_->nSubPatches();
+			const int tailStart = static_cast<int>(out.faces.size());
+			XFoam_Label nEmpty = 0;
+			for (XFoam_Label s = 0; s < nSub; ++s)
+			{
+				if (hitSub.find(static_cast<int>(s)) != hitSub.end()) continue;
+				XFoam_CMshPolyMeshGen::Patch P;
+				const XFoam_String sn = brep_->subPatchName(s);
+				std::string name = static_cast<const std::string&>(sn);
+				if (name.empty()) name = "sub" + std::to_string(s);
+				P.name      = name;
+				P.type      = p_.defaultPatchType;
+				P.startFace = tailStart;
+				P.nFaces    = 0;
+				out.patches.push_back(std::move(P));
+				++nEmpty;
+			}
+			if (nEmpty > 0)
+			{
+				std::cout << "cmsh extractor: emitted " << nEmpty
+				          << " empty patches for sub-patches with no boundary face\n";
+			}
 		}
 	}
 	else
