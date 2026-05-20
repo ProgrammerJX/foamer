@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <unordered_map>
 #include <vector>
 
 class XFoam_BrepBase;
@@ -166,14 +167,47 @@ public:
 	/// 顺序遍历 leaves（read-only）。
 	void forEachLeaf(const std::function<void(const XFoam_CMshOctreeCube&)>& fn) const;
 
+	/// 2:1 balance：保证任意两个相邻 leaf 的 level 差 ≤ 1。CartesianExtractor
+	/// 要求 1-irregularity 才能正确做面切割。算法：每个 leaf 看 26 邻位（face / edge
+	/// / vertex），若有 level ≥ self.level+2 的，把 self 升一级；反复迭代直到稳定。
+	void balance21();
+
+	/// 按 (level, x, y, z) 查 leaf；返回 nullptr = 该 cube 不是 leaf（被细分）
+	/// 或不存在。在 rebuildLeavesAndIndex() 之后才能用。
+	const XFoam_CMshOctreeCube* findLeafByCoords(
+		std::uint8_t level, XFoam_Label x, XFoam_Label y, XFoam_Label z) const;
+
+	/// 沿 face 方向 d (0..5: -x +x -y +y -z +z) 查 leaf 的 face 邻居。
+	///   * Same：邻居与 self 同 level（恰 1 个）
+	///   * Coarser：邻居比 self 粗 1 级（恰 1 个）
+	///   * Finer：邻居比 self 细 1 级（最多 4 个；返回 std::vector）
+	///   * None：face 在 root 边界外
+	/// 要求已 balance21()；mixed-level (差 ≥ 2) 时退化为 None。
+	enum class FaceNbrKind : std::uint8_t { None, Same, Coarser, Finer };
+	struct FaceNbrResult
+	{
+		FaceNbrKind kind = FaceNbrKind::None;
+		const XFoam_CMshOctreeCube* same = nullptr;        ///< Same / Coarser
+		const XFoam_CMshOctreeCube* finer[4] = {nullptr, nullptr, nullptr, nullptr}; ///< Finer
+	};
+	FaceNbrResult faceNeighbour(const XFoam_CMshOctreeCube& self, int d) const;
+
 private:
 	const XFoam_BrepBase&                surface_;
 	XFoam_BoundBox                       rootBox_;
 	XFoam_CMshOctreeCube*                root_ = nullptr;
 	std::vector<XFoam_CMshOctreeCube*>   leaves_;
 
+	// (level, x, y, z) → leaf*。 rebuildLeaves() 后填好；balance21 / extractor 走它做 O(1) 邻居查询。
+	// key = packBits(level | x<<8 | y<<32 | z<<48)，因 level ≤ 14 → x/y/z 范围 [0, 16384)。
+	std::unordered_map<std::uint64_t, const XFoam_CMshOctreeCube*> leafByCoords_;
+
 	void collectLeavesRecursive(XFoam_CMshOctreeCube* c);
 	void rebuildLeaves();
+	void rebuildIndex();
+
+	static std::uint64_t packCoord(
+		std::uint8_t level, XFoam_Label x, XFoam_Label y, XFoam_Label z);
 };
 
 #endif // XFoam_CMshOctree_H_

@@ -8,8 +8,10 @@
 //   x-sample-foam-cmsh -in <stl|step> [-maxCellSize 0.5] [-surfLevel 3]
 //                      [-featureAngle 30] [-deflection 1e-2]
 
+#include "XFoam/cmsh/xfoam_cmshcartesianextractor.h"
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
+#include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
 #include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/topo/xfoam_mbrep.h"
 #include "XFoam/topo/xfoam_topo.h"
@@ -32,6 +34,7 @@ struct Args
 	int          surfLevel    = 3;
 	double       featureAngle = 30;
 	double       deflection   = 1e-2;
+	std::string  polyMeshOut; ///< 若非空，写出 polyMesh 5 件套到此目录
 };
 
 bool parse(int argc, char** argv, Args& a)
@@ -58,6 +61,11 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-surfLevel")   == 0) { if (!nexti(a.surfLevel))   return false; }
 		else if (std::strcmp(arg, "-featureAngle")== 0) { if (!next(a.featureAngle)) return false; }
 		else if (std::strcmp(arg, "-deflection")  == 0) { if (!next(a.deflection))   return false; }
+		else if (std::strcmp(arg, "-polyMeshOut") == 0)
+		{
+			if (i + 1 >= argc) return false;
+			a.polyMeshOut = argv[++i];
+		}
 		else
 		{
 			std::cerr << "unknown arg: " << arg << "\n";
@@ -162,6 +170,37 @@ int main(int argc, char** argv)
 		          << "  Outside=" << nO
 		          << "  Data="    << nD
 		          << "  Inside="  << nI << "\n";
+
+		if (!A.polyMeshOut.empty())
+		{
+			XFoam_CMshCartesianExtractor::Params ep;
+			ep.keepInside = true;
+			ep.keepData   = true;
+			ep.keepOutside = false;
+			XFoam_CMshCartesianExtractor ex(oct(), ep);
+			XFoam_CMshPolyMeshGen pm;
+			std::cout << "extracting polyMesh (balance21 + face dedup)..." << std::endl;
+			const auto t2 = std::chrono::steady_clock::now();
+			if (!ex.extract(pm))
+			{
+				std::cerr << "cmsh extractor: empty mesh (no in-mesh leaves).\n";
+				return 1;
+			}
+			const auto t3 = std::chrono::steady_clock::now();
+			const double mse = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t3 - t2).count();
+			std::cout << "extract done in " << mse << " ms\n"
+			          << "polyMesh: pts=" << pm.points.size()
+			          << "  faces=" << pm.nFaces()
+			          << " (int " << pm.nInternalFaces()
+			          << " / bnd " << pm.nBoundaryFaces() << ")"
+			          << "  cells=" << pm.nCells << "\n";
+			if (!pm.writeToDir(XFoam_String(A.polyMeshOut)))
+			{
+				std::cerr << "writeToDir failed: " << A.polyMeshOut << "\n";
+				return 1;
+			}
+			std::cout << "wrote " << A.polyMeshOut << "\n";
+		}
 
 		return 0;
 	}
