@@ -12,6 +12,7 @@
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
+#include "XFoam/cmsh/xfoam_cmshsurfaceedgeextractor.h"
 #include "XFoam/cmsh/xfoam_cmshsurfacemapper.h"
 #include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/topo/xfoam_mbrep.h"
@@ -39,6 +40,8 @@ struct Args
 	bool         mapSurface = false;
 	int          mapIter    = 1;
 	double       mapRelax   = 1.0;
+	bool         snapFeatures = false;
+	double       featureSearchRadius = 0; ///< 0 = auto
 };
 
 bool parse(int argc, char** argv, Args& a)
@@ -73,6 +76,8 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-mapSurface") == 0) { a.mapSurface = true; }
 		else if (std::strcmp(arg, "-mapIter")    == 0) { if (!nexti(a.mapIter))  return false; }
 		else if (std::strcmp(arg, "-mapRelax")   == 0) { if (!next(a.mapRelax))  return false; }
+		else if (std::strcmp(arg, "-snapFeatures") == 0) { a.snapFeatures = true; }
+		else if (std::strcmp(arg, "-featureSearchRadius") == 0) { if (!next(a.featureSearchRadius)) return false; }
 		else
 		{
 			std::cerr << "unknown arg: " << arg << "\n";
@@ -202,22 +207,42 @@ int main(int argc, char** argv)
 			          << " / bnd " << pm.nBoundaryFaces() << ")"
 			          << "  cells=" << pm.nCells << "\n";
 
-			if (A.mapSurface)
+			if (A.mapSurface || A.snapFeatures)
 			{
+				std::vector<const XFoam_BrepBase*> breps = {&brep};
 				XFoam_CMshSurfaceMapper::Params mp;
 				mp.nIterations = A.mapIter;
 				mp.relaxFactor = A.mapRelax;
 				mp.verbose     = true;
-				std::vector<const XFoam_BrepBase*> breps = {&brep};
 				XFoam_CMshSurfaceMapper mapper(pm, breps, mp);
-				std::cout << "mapping boundary points to surface ("
-				          << mapper.boundaryPointIds().size() << " pts, "
-				          << mp.nIterations << " iter, relax=" << mp.relaxFactor << ")...\n";
-				const auto t4 = std::chrono::steady_clock::now();
-				const XFoam_Label moved = mapper.mapToSurface();
-				const auto t5 = std::chrono::steady_clock::now();
-				const double mse2 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t5 - t4).count();
-				std::cout << "mapper done in " << mse2 << " ms, moved " << moved << " pts\n";
+				if (A.mapSurface)
+				{
+					std::cout << "mapping boundary points to surface ("
+					          << mapper.boundaryPointIds().size() << " pts, "
+					          << mp.nIterations << " iter, relax=" << mp.relaxFactor << ")...\n";
+					const auto t4 = std::chrono::steady_clock::now();
+					const XFoam_Label moved = mapper.mapToSurface();
+					const auto t5 = std::chrono::steady_clock::now();
+					const double mse2 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t5 - t4).count();
+					std::cout << "mapper done in " << mse2 << " ms, moved " << moved << " pts\n";
+				}
+				if (A.snapFeatures)
+				{
+					XFoam_CMshSurfaceEdgeExtractor::Params ep2;
+					ep2.searchRadius = A.featureSearchRadius;
+					ep2.cellSizeHint = A.maxCellSize / static_cast<double>(1 << A.surfLevel);
+					ep2.verbose      = true;
+					XFoam_CMshSurfaceEdgeExtractor edx(pm, breps, mapper.boundaryPointIds(), ep2);
+					std::cout << "snapping features (R=" << (ep2.searchRadius > 0 ? ep2.searchRadius : ep2.cellSizeHint * 0.5)
+					          << ", cellHint=" << ep2.cellSizeHint << ")...\n";
+					const auto t6 = std::chrono::steady_clock::now();
+					const auto st = edx.snap();
+					const auto t7 = std::chrono::steady_clock::now();
+					const double mse3 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t7 - t6).count();
+					std::cout << "edge extractor done in " << mse3 << " ms (corners=" << st.nCornerSnap
+					          << ", edges=" << st.nEdgeSnap
+					          << ", maxSnapDist=" << st.maxSnapDist << ")\n";
+				}
 			}
 
 			if (!pm.writeToDir(XFoam_String(A.polyMeshOut)))
