@@ -27,6 +27,13 @@ XFoam_CMshOctreeCreator& XFoam_CMshOctreeCreator::addRegionRefine(
 	return *this;
 }
 
+XFoam_CMshOctreeCreator& XFoam_CMshOctreeCreator::addObjectRefine(
+	std::unique_ptr<XFoam_CMshObjRefine> obj)
+{
+	if (obj) objects_.push_back(std::move(obj));
+	return *this;
+}
+
 XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 {
 	if (surfs_.empty() || surfs_.front().brep == nullptr)
@@ -87,6 +94,14 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 	{
 		const int lv = std::min(rr.level, p_.maxLevel);
 		oct().refineRegion(rr.box, lv);
+	}
+
+	// 5b) object refines（box / sphere / cone / 任意 XFoam_CMshObjRefine 子类）
+	for (const auto& op : objects_)
+	{
+		if (!op) continue;
+		const int lv = std::min(op->level, p_.maxLevel);
+		oct().refineByObject(*op, lv);
 	}
 
 	// 6) inside/outside 分类

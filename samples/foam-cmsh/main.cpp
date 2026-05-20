@@ -9,11 +9,14 @@
 //                      [-featureAngle 30] [-deflection 1e-2]
 
 #include "XFoam/cmsh/xfoam_cmshcartesianextractor.h"
+#include "XFoam/cmsh/xfoam_cmshobjrefine.h"
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
 #include "XFoam/cmsh/xfoam_cmshsurfaceedgeextractor.h"
 #include "XFoam/cmsh/xfoam_cmshsurfacemapper.h"
+
+#include <memory>
 #include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/topo/xfoam_mbrep.h"
 #include "XFoam/topo/xfoam_topo.h"
@@ -42,6 +45,14 @@ struct Args
 	double       mapRelax   = 1.0;
 	bool         snapFeatures = false;
 	double       featureSearchRadius = 0; ///< 0 = auto
+
+	/// 命令行多次指定的 object refines
+	struct BoxR    { double xmn, ymn, zmn, xmx, ymx, zmx; int level; };
+	struct SphereR { double cx, cy, cz, r; int level; };
+	struct ConeR   { double ax, ay, az, bx, by, bz, ra, rb; int level; };
+	std::vector<BoxR>    refineBoxes;
+	std::vector<SphereR> refineSpheres;
+	std::vector<ConeR>   refineCones;
 };
 
 bool parse(int argc, char** argv, Args& a)
@@ -78,6 +89,32 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-mapRelax")   == 0) { if (!next(a.mapRelax))  return false; }
 		else if (std::strcmp(arg, "-snapFeatures") == 0) { a.snapFeatures = true; }
 		else if (std::strcmp(arg, "-featureSearchRadius") == 0) { if (!next(a.featureSearchRadius)) return false; }
+		else if (std::strcmp(arg, "-refineBox") == 0)
+		{
+			Args::BoxR b;
+			if (!next(b.xmn) || !next(b.ymn) || !next(b.zmn)
+			    || !next(b.xmx) || !next(b.ymx) || !next(b.zmx)
+			    || !nexti(b.level))
+				return false;
+			a.refineBoxes.push_back(b);
+		}
+		else if (std::strcmp(arg, "-refineSphere") == 0)
+		{
+			Args::SphereR s;
+			if (!next(s.cx) || !next(s.cy) || !next(s.cz)
+			    || !next(s.r) || !nexti(s.level))
+				return false;
+			a.refineSpheres.push_back(s);
+		}
+		else if (std::strcmp(arg, "-refineCone") == 0)
+		{
+			Args::ConeR c;
+			if (!next(c.ax) || !next(c.ay) || !next(c.az)
+			    || !next(c.bx) || !next(c.by) || !next(c.bz)
+			    || !next(c.ra) || !next(c.rb) || !nexti(c.level))
+				return false;
+			a.refineCones.push_back(c);
+		}
 		else
 		{
 			std::cerr << "unknown arg: " << arg << "\n";
@@ -158,6 +195,36 @@ int main(int argc, char** argv)
 		p.maxLevel    = A.surfLevel + 4;
 		XFoam_CMshOctreeCreator cr(box, p);
 		cr.addSurfaceRefine(brep, A.surfLevel);
+		for (const auto& b : A.refineBoxes)
+		{
+			auto ob = std::make_unique<XFoam_CMshBoxRefine>();
+			ob->box = XFoam_BoundBox(
+				XFoam_Vector3D(b.xmn, b.ymn, b.zmn),
+				XFoam_Vector3D(b.xmx, b.ymx, b.zmx));
+			ob->level = b.level;
+			ob->name  = "box";
+			cr.addObjectRefine(std::move(ob));
+		}
+		for (const auto& s : A.refineSpheres)
+		{
+			auto os = std::make_unique<XFoam_CMshSphereRefine>();
+			os->centre = XFoam_Vector3D(s.cx, s.cy, s.cz);
+			os->radius = s.r;
+			os->level  = s.level;
+			os->name   = "sphere";
+			cr.addObjectRefine(std::move(os));
+		}
+		for (const auto& c : A.refineCones)
+		{
+			auto oc = std::make_unique<XFoam_CMshConeRefine>();
+			oc->a       = XFoam_Vector3D(c.ax, c.ay, c.az);
+			oc->b       = XFoam_Vector3D(c.bx, c.by, c.bz);
+			oc->radiusA = c.ra;
+			oc->radiusB = c.rb;
+			oc->level   = c.level;
+			oc->name    = "cone";
+			cr.addObjectRefine(std::move(oc));
+		}
 
 		std::cout << "building octree (maxCellSize=" << A.maxCellSize
 		          << ", surfLevel=" << A.surfLevel << ")...\n" << std::flush;

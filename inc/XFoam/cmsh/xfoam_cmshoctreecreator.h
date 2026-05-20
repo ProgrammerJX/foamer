@@ -15,12 +15,14 @@
 // 后续 phase 2.x 再补 objectRefinement (box/sphere/cone)、edge refinement、
 // patch-name based refinement 等。
 
+#include "XFoam/cmsh/xfoam_cmshobjrefine.h"
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/utilities/xfoam_autoptr.h"
 #include "XFoam/utilities/xfoam_boundbox.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_types.h"
 
+#include <memory>
 #include <vector>
 
 class XFoam_BrepBase;
@@ -70,6 +72,11 @@ public:
 	XFoam_CMshOctreeCreator& addSurfaceRefine(const XFoam_BrepBase& s, int level);
 	XFoam_CMshOctreeCreator& addRegionRefine(const XFoam_BoundBox& region, int level);
 
+	/// 加入一个 objectRefinement（box/sphere/cone 等）。Creator 接管所有权。
+	/// 与 RegionRefine 的差别：RegionRefine 只能 box；ObjectRefine 可以是任意
+	/// XFoam_CMshObjRefine 子类，box 同样可用 XFoam_CMshBoxRefine 表达。
+	XFoam_CMshOctreeCreator& addObjectRefine(std::unique_ptr<XFoam_CMshObjRefine> obj);
+
 	/// surfs[0] 必须存在；它是 octree 的"主"几何 → 用来做 inside/outside 分类。
 	/// 流程：
 	///   1) inflate root bbox
@@ -84,8 +91,9 @@ public:
 private:
 	XFoam_BoundBox             rootBox_;
 	Params                     p_;
-	std::vector<SurfaceRefine> surfs_;
-	std::vector<RegionRefine>  regions_;
+	std::vector<SurfaceRefine>                         surfs_;
+	std::vector<RegionRefine>                          regions_;
+	std::vector<std::unique_ptr<XFoam_CMshObjRefine>>  objects_;
 };
 
 #endif // XFoam_CMshOctreeCreator_H_

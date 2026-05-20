@@ -167,6 +167,11 @@ public:
 	/// 顺序遍历 leaves（read-only）。
 	void forEachLeaf(const std::function<void(const XFoam_CMshOctreeCube&)>& fn) const;
 
+	/// 用 objectRefinement 谓词加密：把所有 obj.boxIntersects(leaf.box) 的 leaf
+	/// 迭代加密到 targetLevel。对应 cfMesh 的 refineByObject。targetLevel < 0
+	/// 时使用 obj.level。
+	void refineByObject(const class XFoam_CMshObjRefine& obj, int targetLevel = -1);
+
 	/// 2:1 balance：保证任意两个相邻 leaf 的 level 差 ≤ 1。CartesianExtractor
 	/// 要求 1-irregularity 才能正确做面切割。算法：每个 leaf 看 26 邻位（face / edge
 	/// / vertex），若有 level ≥ self.level+2 的，把 self 升一级；反复迭代直到稳定。

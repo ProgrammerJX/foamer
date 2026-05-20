@@ -1,5 +1,7 @@
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 
+#include "XFoam/cmsh/xfoam_cmshobjrefine.h"
+
 #include "XFoam/topo/xfoam_brep.h"
 
 #include <algorithm>
@@ -225,6 +227,29 @@ XFoam_CMshOctree::faceNeighbour(const XFoam_CMshOctreeCube& self, int d) const
 	}
 	if (anyFine) r.kind = FaceNbrKind::Finer;
 	return r;
+}
+
+void XFoam_CMshOctree::refineByObject(const XFoam_CMshObjRefine& obj, int targetLevel)
+{
+	const int target = (targetLevel < 0) ? obj.level : targetLevel;
+	bool progressed = true;
+	int safety = 64;
+	while (progressed && safety-- > 0)
+	{
+		progressed = false;
+		std::vector<XFoam_CMshOctreeCube*> snap = leaves_;
+		for (auto* leaf : snap)
+		{
+			if (!leaf->isLeaf()) continue;
+			if (leaf->level >= target) continue;
+			XFoam_Vector3D mn, mx;
+			leaf->cubeBox(rootBox_, mn, mx);
+			if (!obj.boxIntersects(XFoam_BoundBox(mn, mx))) continue;
+			leaf->subdivide();
+			progressed = true;
+		}
+		if (progressed) rebuildLeaves();
+	}
 }
 
 void XFoam_CMshOctree::balance21()
