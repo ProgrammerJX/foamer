@@ -8,14 +8,9 @@
 //   x-sample-foam-cmsh -in <stl|step> [-maxCellSize 0.5] [-surfLevel 3]
 //                      [-featureAngle 30] [-deflection 1e-2]
 
-#include "XFoam/cmsh/xfoam_cmshcartesianextractor.h"
-#include "XFoam/cmsh/xfoam_cmshmeshoptimizer.h"
 #include "XFoam/cmsh/xfoam_cmshobjrefine.h"
-#include "XFoam/cmsh/xfoam_cmshoctree.h"
-#include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
+#include "XFoam/cmsh/xfoam_cmshpipeline.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
-#include "XFoam/cmsh/xfoam_cmshsurfaceedgeextractor.h"
-#include "XFoam/cmsh/xfoam_cmshsurfacemapper.h"
 
 #include <memory>
 #include "XFoam/topo/xfoam_brep.h"
@@ -218,156 +213,61 @@ int main(int argc, char** argv)
 		std::cout << "  features : " << brep.nFeatureEdges() << " edges, "
 		          << brep.nFeatureVertices() << " verts (angle=" << A.featureAngle << ")\n";
 
-		XFoam_CMshOctreeCreator::Params p;
-		p.maxCellSize = static_cast<XFoam_Scalar>(A.maxCellSize);
-		p.maxLevel    = A.surfLevel + 4;
-		p.fitFeatures             = A.fitFeatures;
-		p.fitFeaturesSafety       = static_cast<XFoam_Scalar>(A.fitFeatSafety);
-		p.fitFeaturesMaxLevelBump = A.fitFeatBump;
-		XFoam_CMshOctreeCreator cr(box, p);
-		cr.addSurfaceRefine(brep, A.surfLevel);
+		// 全套参数打包成 XFoam_CMshPipeline::Params
+		XFoam_CMshPipeline::Params pp;
+		pp.maxCellSize             = static_cast<XFoam_Scalar>(A.maxCellSize);
+		pp.surfLevel               = A.surfLevel;
+		pp.maxLevel                = A.surfLevel + 4;
+		pp.fitFeatures             = A.fitFeatures;
+		pp.fitFeaturesSafety       = static_cast<XFoam_Scalar>(A.fitFeatSafety);
+		pp.fitFeaturesMaxLevelBump = A.fitFeatBump;
+		pp.perFacePatches          = A.perFacePatches;
+		pp.useLocationInMesh       = A.useLocationInMesh;
+		pp.locationInMesh          = XFoam_Vector3D(A.lim[0], A.lim[1], A.lim[2]);
+		pp.enableMapper            = A.mapSurface;
+		pp.mapIter                 = A.mapIter;
+		pp.mapRelax                = static_cast<XFoam_Scalar>(A.mapRelax);
+		pp.enableEdgeSnap          = A.snapFeatures;
+		pp.featureSearchRadius     = static_cast<XFoam_Scalar>(A.featureSearchRadius);
+		pp.enableOptimizer         = A.optimize;
+		pp.optIter                 = A.optIter;
+		pp.optRelax                = static_cast<XFoam_Scalar>(A.optRelax);
+		pp.optSnapFeatures         = A.snapFeatures;
+		pp.optQuality              = A.optQuality;
+		pp.optMinFaceNormalDot     = static_cast<XFoam_Scalar>(A.optMinDot);
+		pp.optMinFaceAreaRatio     = static_cast<XFoam_Scalar>(A.optMinAreaR);
+		pp.verbose                 = true;
+
+		XFoam_CMshPipeline pipeline(pp);
 		for (const auto& b : A.refineBoxes)
 		{
-			auto ob = std::make_unique<XFoam_CMshBoxRefine>();
-			ob->box = XFoam_BoundBox(
-				XFoam_Vector3D(b.xmn, b.ymn, b.zmn),
-				XFoam_Vector3D(b.xmx, b.ymx, b.zmx));
-			ob->level = b.level;
-			ob->name  = "box";
-			cr.addObjectRefine(std::move(ob));
+			pipeline.addBoxRefine(
+				XFoam_BoundBox(
+					XFoam_Vector3D(b.xmn, b.ymn, b.zmn),
+					XFoam_Vector3D(b.xmx, b.ymx, b.zmx)),
+				b.level);
 		}
 		for (const auto& s : A.refineSpheres)
 		{
-			auto os = std::make_unique<XFoam_CMshSphereRefine>();
-			os->centre = XFoam_Vector3D(s.cx, s.cy, s.cz);
-			os->radius = s.r;
-			os->level  = s.level;
-			os->name   = "sphere";
-			cr.addObjectRefine(std::move(os));
+			pipeline.addSphereRefine(
+				XFoam_Vector3D(s.cx, s.cy, s.cz),
+				static_cast<XFoam_Scalar>(s.r), s.level);
 		}
 		for (const auto& c : A.refineCones)
 		{
-			auto oc = std::make_unique<XFoam_CMshConeRefine>();
-			oc->a       = XFoam_Vector3D(c.ax, c.ay, c.az);
-			oc->b       = XFoam_Vector3D(c.bx, c.by, c.bz);
-			oc->radiusA = c.ra;
-			oc->radiusB = c.rb;
-			oc->level   = c.level;
-			oc->name    = "cone";
-			cr.addObjectRefine(std::move(oc));
+			pipeline.addConeRefine(
+				XFoam_Vector3D(c.ax, c.ay, c.az),
+				XFoam_Vector3D(c.bx, c.by, c.bz),
+				static_cast<XFoam_Scalar>(c.ra),
+				static_cast<XFoam_Scalar>(c.rb),
+				c.level);
 		}
-
-		std::cout << "building octree (maxCellSize=" << A.maxCellSize
-		          << ", surfLevel=" << A.surfLevel << ")...\n" << std::flush;
-		const auto t0 = std::chrono::steady_clock::now();
-		auto oct = cr.build();
-		const auto t1 = std::chrono::steady_clock::now();
-		const double ms = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t1 - t0).count();
-		std::cout << "build done in " << ms << " ms\n";
-
-		std::vector<XFoam_Label> perLevel;
-		oct().countLeavesByLevel(perLevel);
-		std::cout << "leaves: " << oct().nLeaves() << "\n";
-		for (std::size_t lv = 0; lv < perLevel.size(); ++lv)
-		{
-			std::cout << "  level " << lv << ": " << perLevel[lv] << " leaves\n";
-		}
-
-		XFoam_Label nU, nO, nD, nI;
-		oct().countLeavesByType(nU, nO, nD, nI);
-		std::cout << "type:   "
-		          << "Unknown=" << nU
-		          << "  Outside=" << nO
-		          << "  Data="    << nD
-		          << "  Inside="  << nI << "\n";
 
 		if (!A.polyMeshOut.empty())
 		{
-			XFoam_CMshCartesianExtractor::Params ep;
-			ep.keepInside = true;
-			ep.keepData   = true;
-			ep.keepOutside = false;
-			ep.perFacePatches    = A.perFacePatches;
-			ep.useLocationInMesh = A.useLocationInMesh;
-			ep.locationInMesh    = XFoam_Vector3D(A.lim[0], A.lim[1], A.lim[2]);
-			XFoam_CMshCartesianExtractor ex(oct(), ep, &brep);
 			XFoam_CMshPolyMeshGen pm;
-			std::cout << "extracting polyMesh (balance21 + face dedup)..." << std::endl;
-			const auto t2 = std::chrono::steady_clock::now();
-			if (!ex.extract(pm))
-			{
-				std::cerr << "cmsh extractor: empty mesh (no in-mesh leaves).\n";
-				return 1;
-			}
-			const auto t3 = std::chrono::steady_clock::now();
-			const double mse = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t3 - t2).count();
-			std::cout << "extract done in " << mse << " ms\n"
-			          << "polyMesh: pts=" << pm.points.size()
-			          << "  faces=" << pm.nFaces()
-			          << " (int " << pm.nInternalFaces()
-			          << " / bnd " << pm.nBoundaryFaces() << ")"
-			          << "  cells=" << pm.nCells << "\n";
-
-			if (A.mapSurface || A.snapFeatures)
-			{
-				XFoam_CMshSurfaceMapper::Params mp;
-				mp.nIterations = A.mapIter;
-				mp.relaxFactor = A.mapRelax;
-				mp.verbose     = true;
-				XFoam_CMshSurfaceMapper mapper(pm, brep, mp);
-				if (A.mapSurface)
-				{
-					std::cout << "mapping boundary points to surface ("
-					          << mapper.boundaryPointIds().size() << " pts, "
-					          << mp.nIterations << " iter, relax=" << mp.relaxFactor << ")...\n";
-					const auto t4 = std::chrono::steady_clock::now();
-					const XFoam_Label moved = mapper.mapToSurface();
-					const auto t5 = std::chrono::steady_clock::now();
-					const double mse2 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t5 - t4).count();
-					std::cout << "mapper done in " << mse2 << " ms, moved " << moved << " pts\n";
-				}
-				if (A.snapFeatures)
-				{
-					XFoam_CMshSurfaceEdgeExtractor::Params ep2;
-					ep2.searchRadius = A.featureSearchRadius;
-					ep2.cellSizeHint = A.maxCellSize / static_cast<double>(1 << A.surfLevel);
-					ep2.verbose      = true;
-					XFoam_CMshSurfaceEdgeExtractor edx(pm, brep, mapper.boundaryPointIds(), ep2);
-					std::cout << "snapping features (R=" << (ep2.searchRadius > 0 ? ep2.searchRadius : ep2.cellSizeHint * 0.5)
-					          << ", cellHint=" << ep2.cellSizeHint << ")...\n";
-					const auto t6 = std::chrono::steady_clock::now();
-					const auto st = edx.snap();
-					const auto t7 = std::chrono::steady_clock::now();
-					const double mse3 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t7 - t6).count();
-					std::cout << "edge extractor done in " << mse3 << " ms (corners=" << st.nCornerSnap
-					          << ", edges=" << st.nEdgeSnap
-					          << ", maxSnapDist=" << st.maxSnapDist << ")\n";
-				}
-				if (A.optimize)
-				{
-					XFoam_CMshMeshOptimizer::Params op;
-					op.nIterations  = A.optIter;
-					op.relaxFactor  = A.optRelax;
-					op.reproject    = true;
-					op.snapFeatures = A.snapFeatures;
-					op.cellSizeHint = A.maxCellSize / static_cast<double>(1 << A.surfLevel);
-					op.verbose      = true;
-					op.qualityCheck     = A.optQuality;
-					op.minFaceNormalDot = static_cast<XFoam_Scalar>(A.optMinDot);
-					op.minFaceAreaRatio = static_cast<XFoam_Scalar>(A.optMinAreaR);
-					XFoam_CMshMeshOptimizer optr(pm, brep, op);
-					std::cout << "optimizing (boundary Laplacian + reproject, iter=" << op.nIterations
-					          << " relax=" << op.relaxFactor << ")...\n";
-					const auto t8 = std::chrono::steady_clock::now();
-					const auto ost = optr.optimize();
-					const auto t9 = std::chrono::steady_clock::now();
-					const double mse4 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t9 - t8).count();
-					std::cout << "optimizer done in " << mse4 << " ms (lastIter moved=" << ost.nMoved
-					          << ", avg=" << ost.avgMove
-					          << ", max=" << ost.maxMove
-					          << ", rollback=" << ost.nRollback << ")\n";
-				}
-			}
+			const auto st = pipeline.run(brep, pm);
+			(void) st;
 
 			if (!pm.writeToDir(XFoam_String(A.polyMeshOut)))
 			{
