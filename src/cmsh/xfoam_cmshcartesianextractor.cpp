@@ -403,6 +403,7 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 	// 6a) 给 boundary face 打 patchKey（perFacePatches 才需要）
 	if (p_.perFacePatches && brep_ && !brep_->empty())
 	{
+		std::unordered_map<int, int> hitCount; // subId+1 → face count
 		for (int rfi : boundaryIdx)
 		{
 			RawFace& rf = raw[static_cast<std::size_t>(rfi)];
@@ -411,6 +412,34 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 			c *= static_cast<XFoam_Scalar>(0.25);
 			const XFoam_Label sub = brep_->closestSubPatchId(c);
 			rf.patchKey = static_cast<int>(sub + 1);
+			++hitCount[rf.patchKey];
+		}
+		const XFoam_Label nSub = brep_->nSubPatches();
+		std::cout << "cmsh extractor: brep has " << nSub
+		          << " subPatches, mesh boundary touched "
+		          << hitCount.size() << " of them ("
+		          << (nSub > 0 ? (100.0 * hitCount.size() / nSub) : 0)
+		          << "% coverage)\n";
+		if (static_cast<XFoam_Label>(hitCount.size()) < nSub)
+		{
+			const XFoam_Label nMissing = nSub - static_cast<XFoam_Label>(hitCount.size());
+			std::cout << "cmsh extractor: WARNING " << nMissing
+			          << " TopoDS_Face(s) have no boundary mesh face — refine to "
+			             "preserve geometry, or enable fillAllSubPatches to keep "
+			             "placeholder patches. First missing:\n";
+			int printed = 0;
+			for (XFoam_Label s = 0; s < nSub && printed < 10; ++s)
+			{
+				if (hitCount.find(static_cast<int>(s + 1)) != hitCount.end()) continue;
+				const XFoam_String sn = brep_->subPatchName(s);
+				const std::string nm = static_cast<const std::string&>(sn);
+				std::cout << "    [" << s << "] " << (nm.empty() ? "sub" + std::to_string(s) : nm) << "\n";
+				++printed;
+			}
+			if (nMissing > printed)
+			{
+				std::cout << "    ... and " << (nMissing - printed) << " more.\n";
+			}
 		}
 	}
 

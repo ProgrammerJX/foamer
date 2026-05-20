@@ -42,7 +42,7 @@ struct Args
 	bool         snapFeatures = false;
 	double       featureSearchRadius = 0; ///< 0 = auto
 	bool         perFacePatches = false;
-	bool         fillAllSubPatches = false;
+	bool         fillAllSubPatches = true;  ///< 默认开：保所有 TopoDS_Face 在 boundary 列表中
 	bool         noRepatch      = false;
 	bool         optimize       = false;
 	int          optIter        = 3;
@@ -100,7 +100,8 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-snapFeatures") == 0) { a.snapFeatures = true; }
 		else if (std::strcmp(arg, "-featureSearchRadius") == 0) { if (!next(a.featureSearchRadius)) return false; }
 		else if (std::strcmp(arg, "-perFacePatches") == 0) { a.perFacePatches = true; }
-		else if (std::strcmp(arg, "-fillAllSubPatches") == 0) { a.fillAllSubPatches = true; }
+		else if (std::strcmp(arg, "-fillAllSubPatches")   == 0) { a.fillAllSubPatches = true; }
+		else if (std::strcmp(arg, "-noFillAllSubPatches") == 0) { a.fillAllSubPatches = false; }
 		else if (std::strcmp(arg, "-noRepatch") == 0) { a.noRepatch = true; }
 		else if (std::strcmp(arg, "-optimize")  == 0) { a.optimize = true; }
 		else if (std::strcmp(arg, "-optIter")   == 0) { if (!nexti(a.optIter))  return false; }
@@ -215,7 +216,8 @@ int main(int argc, char** argv)
 
 		brep.buildFeatures(static_cast<XFoam_Scalar>(A.featureAngle));
 		std::cout << "  features : " << brep.nFeatureEdges() << " edges, "
-		          << brep.nFeatureVertices() << " verts (angle=" << A.featureAngle << ")\n";
+		          << brep.nFeatureVertices() << " verts (angle=" << A.featureAngle << ")\n"
+		          << "  subPatches (TopoDS_Face count): " << brep.nSubPatches() << "\n";
 
 		// 全套参数打包成 XFoam_CMshPipeline::Params
 		XFoam_CMshPipeline::Params pp;

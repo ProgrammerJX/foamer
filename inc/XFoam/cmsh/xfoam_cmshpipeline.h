@@ -65,7 +65,9 @@ public:
 		std::string  defaultPatchType        = "wall";
 
 		/// perFacePatches 下，是否输出未命中 sub-patch 的空 patch（防 TpFace 丢）
-		bool         fillAllSubPatches       = false;
+		/// 默认 true：与 snappyHexMesh 行为一致，保所有 TopoDS_Face id 在
+		/// boundary 列表里 referenceable，避免下游 BC 配置丢面。
+		bool         fillAllSubPatches       = true;
 
 		/// perFacePatches 下，是否在 mapper（+ edgeSnap）之后用 post-mapped
 		/// centroid 重写 pm.patches（重新算 closestSubPatchId），把 extract 阶段

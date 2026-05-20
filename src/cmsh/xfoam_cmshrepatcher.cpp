@@ -169,6 +169,28 @@ XFoam_CMshRepatcher::Stats XFoam_CMshRepatcher::repatch()
 		          << "  reassigned=" << st.nReassigned
 		          << "  patches " << st.nPatchesBefore << " -> " << st.nPatchesAfter
 		          << "  (empty added " << st.nEmptyAdded << ")\n";
+
+		const XFoam_Label nSub = brep_.nSubPatches();
+		if (static_cast<XFoam_Label>(hitSub.size()) < nSub)
+		{
+			const XFoam_Label nMissing = nSub - static_cast<XFoam_Label>(hitSub.size());
+			std::cout << "  repatcher: WARNING " << nMissing
+			          << " TopoDS_Face(s) still have no boundary mesh face after re-mapping. "
+			             "First missing:\n";
+			int printed = 0;
+			for (XFoam_Label s = 0; s < nSub && printed < 10; ++s)
+			{
+				if (hitSub.find(static_cast<int>(s)) != hitSub.end()) continue;
+				const XFoam_String sn = brep_.subPatchName(s);
+				const std::string nm = static_cast<const std::string&>(sn);
+				std::cout << "    [" << s << "] " << (nm.empty() ? "sub" + std::to_string(s) : nm) << "\n";
+				++printed;
+			}
+			if (nMissing > printed)
+			{
+				std::cout << "    ... and " << (nMissing - printed) << " more.\n";
+			}
+		}
 	}
 	return st;
 }
