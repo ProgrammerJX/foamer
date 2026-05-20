@@ -14,17 +14,20 @@
 //     2 个 cell 引用 → internal。
 //
 // 不做的事（MVP 阶段）：
-//   * locationInMesh（默认就是 type==Inside；不做 BFS 连通群剔除）
 //   * cell zones / face zones / multi-region
 //
 // 支持的事：
 //   * perFacePatches：boundary face 按 brep.closestSubPatchId(faceCenter) 拆
 //     patch；每个 sub-patch 单独成一个 polyMesh boundary patch。
+//   * locationInMesh：给定一个 3D 点，extract 只保留该点所在 face-连通群（用
+//     octree.faceNeighbour BFS 走 Inside+Data 的 in-mesh leaf）。可干掉"外
+//     壳"伪 Inside 群（如多层 surface 之间的间隙腔体）。
 
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_types.h"
+#include "XFoam/utilities/xfoam_vector.h"
 
 #include <string>
 
@@ -61,6 +64,10 @@ public:
 		///   * true：boundary face 按 brep.closestSubPatchId(faceCenter) 分桶；
 		///     需要同时通过 ctor 传入 brep
 		bool perFacePatches = false;
+
+		/// 是否启用 locationInMesh BFS 连通群剔除
+		bool useLocationInMesh = false;
+		XFoam_Vector3D locationInMesh = XFoam_Vector3D(0, 0, 0);
 
 		/// patch type 总缺省。已知 patch 名（"walls", "inlet", "outlet", ...）
 		/// 可考虑后续做 name → type 映射；MVP 一律用 defaultPatchType。

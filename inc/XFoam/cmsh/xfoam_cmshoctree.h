@@ -182,6 +182,10 @@ public:
 	const XFoam_CMshOctreeCube* findLeafByCoords(
 		std::uint8_t level, XFoam_Label x, XFoam_Label y, XFoam_Label z) const;
 
+	/// 按 3D 坐标查包含该点的 leaf。pos 落在 root 外 → nullptr；
+	/// 否则从 root 逐级 descend 直到 leaf 命中。O(maxLevel)。
+	const XFoam_CMshOctreeCube* findLeafContaining(const XFoam_Vector3D& pos) const;
+
 	/// 沿 face 方向 d (0..5: -x +x -y +y -z +z) 查 leaf 的 face 邻居。
 	///   * Same：邻居与 self 同 level（恰 1 个）
 	///   * Coarser：邻居比 self 粗 1 级（恰 1 个）

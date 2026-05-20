@@ -53,6 +53,8 @@ struct Args
 	bool         fitFeatures    = false;
 	double       fitFeatSafety  = 0.5;
 	int          fitFeatBump    = 2;
+	bool         useLocationInMesh = false;
+	double       lim[3] = {0, 0, 0};
 
 	/// 命令行多次指定的 object refines
 	struct BoxR    { double xmn, ymn, zmn, xmx, ymx, zmx; int level; };
@@ -104,6 +106,11 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-fitFeatures") == 0) { a.fitFeatures = true; }
 		else if (std::strcmp(arg, "-fitFeatSafety") == 0) { if (!next(a.fitFeatSafety)) return false; }
 		else if (std::strcmp(arg, "-fitFeatBump")   == 0) { if (!nexti(a.fitFeatBump))  return false; }
+		else if (std::strcmp(arg, "-locationInMesh") == 0)
+		{
+			if (!next(a.lim[0]) || !next(a.lim[1]) || !next(a.lim[2])) return false;
+			a.useLocationInMesh = true;
+		}
 		else if (std::strcmp(arg, "-refineBox") == 0)
 		{
 			Args::BoxR b;
@@ -274,7 +281,9 @@ int main(int argc, char** argv)
 			ep.keepInside = true;
 			ep.keepData   = true;
 			ep.keepOutside = false;
-			ep.perFacePatches = A.perFacePatches;
+			ep.perFacePatches    = A.perFacePatches;
+			ep.useLocationInMesh = A.useLocationInMesh;
+			ep.locationInMesh    = XFoam_Vector3D(A.lim[0], A.lim[1], A.lim[2]);
 			XFoam_CMshCartesianExtractor ex(oct(), ep, &brep);
 			XFoam_CMshPolyMeshGen pm;
 			std::cout << "extracting polyMesh (balance21 + face dedup)..." << std::endl;

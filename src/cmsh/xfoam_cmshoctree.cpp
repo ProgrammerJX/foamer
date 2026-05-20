@@ -150,6 +150,42 @@ const XFoam_CMshOctreeCube* XFoam_CMshOctree::findLeafByCoords(
 	return it == leafByCoords_.end() ? nullptr : it->second;
 }
 
+const XFoam_CMshOctreeCube*
+XFoam_CMshOctree::findLeafContaining(const XFoam_Vector3D& pos) const
+{
+	const XFoam_Vector3D mn = rootBox_.min();
+	const XFoam_Vector3D mx = rootBox_.max();
+	if (pos.x() < mn.x() || pos.x() > mx.x() ||
+	    pos.y() < mn.y() || pos.y() > mx.y() ||
+	    pos.z() < mn.z() || pos.z() > mx.z())
+	{
+		return nullptr;
+	}
+	const XFoam_CMshOctreeCube* cur = root_;
+	if (!cur) return nullptr;
+	while (cur && !cur->isLeaf())
+	{
+		// 找哪个 child 含 pos
+		bool descended = false;
+		for (int k = 0; k < 8 && !descended; ++k)
+		{
+			auto* ch = cur->children[k];
+			if (!ch) continue;
+			XFoam_Vector3D cmn, cmx;
+			ch->cubeBox(rootBox_, cmn, cmx);
+			if (pos.x() >= cmn.x() && pos.x() <= cmx.x() &&
+			    pos.y() >= cmn.y() && pos.y() <= cmx.y() &&
+			    pos.z() >= cmn.z() && pos.z() <= cmx.z())
+			{
+				cur = ch;
+				descended = true;
+			}
+		}
+		if (!descended) return nullptr;
+	}
+	return cur;
+}
+
 namespace
 {
 // face dir → (axis, sign)：0:-x 1:+x 2:-y 3:+y 4:-z 5:+z

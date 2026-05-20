@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <queue>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -95,6 +96,7 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 	std::vector<const XFoam_CMshOctreeCube*> cells;
 	cells.reserve(static_cast<std::size_t>(oct_.nLeaves()));
 	std::vector<int> leafToCell(static_cast<std::size_t>(oct_.nLeaves()), -1);
+	std::vector<bool> keepFlag(static_cast<std::size_t>(oct_.nLeaves()), false);
 	oct_.forEachLeaf([&](const XFoam_CMshOctreeCube& c) {
 		bool keep = false;
 		switch (c.type)
@@ -104,7 +106,74 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 			case XFoam_CMshCubeType::Outside: keep = p_.keepOutside; break;
 			default: break;
 		}
-		if (keep)
+		if (keep) keepFlag[static_cast<std::size_t>(c.leafIdx)] = true;
+	});
+
+	// 2b) locationInMesh BFS：把 keepFlag 收紧到指定点所在 face-连通群
+	if (p_.useLocationInMesh)
+	{
+		const auto* seed = oct_.findLeafContaining(p_.locationInMesh);
+		if (!seed)
+		{
+			std::cerr << "cmsh extractor: locationInMesh "
+			          << "(" << p_.locationInMesh.x() << ", "
+			          << p_.locationInMesh.y() << ", "
+			          << p_.locationInMesh.z() << ") 不在 root bbox 内，忽略该过滤。\n";
+		}
+		else if (!keepFlag[static_cast<std::size_t>(seed->leafIdx)])
+		{
+			std::cerr << "cmsh extractor: locationInMesh 落在被过滤掉的 leaf "
+			          << "(type=" << static_cast<int>(seed->type)
+			          << ", level=" << static_cast<int>(seed->level)
+			          << ")，BFS 无法启动，忽略该过滤。\n";
+		}
+		else
+		{
+			std::vector<bool> reached(static_cast<std::size_t>(oct_.nLeaves()), false);
+			std::queue<const XFoam_CMshOctreeCube*> bfs;
+			bfs.push(seed);
+			reached[static_cast<std::size_t>(seed->leafIdx)] = true;
+			while (!bfs.empty())
+			{
+				const auto* cur = bfs.front();
+				bfs.pop();
+				for (int d = 0; d < 6; ++d)
+				{
+					const auto nbr = oct_.faceNeighbour(*cur, d);
+					auto consume = [&](const XFoam_CMshOctreeCube* lf) {
+						if (!lf) return;
+						const std::size_t idx = static_cast<std::size_t>(lf->leafIdx);
+						if (!keepFlag[idx] || reached[idx]) return;
+						reached[idx] = true;
+						bfs.push(lf);
+					};
+					switch (nbr.kind)
+					{
+						case XFoam_CMshOctree::FaceNbrKind::Same:
+						case XFoam_CMshOctree::FaceNbrKind::Coarser:
+							consume(nbr.same);
+							break;
+						case XFoam_CMshOctree::FaceNbrKind::Finer:
+							for (int k = 0; k < 4; ++k) consume(nbr.finer[k]);
+							break;
+						default: break;
+					}
+				}
+			}
+			// 用 reached 替换 keepFlag
+			XFoam_Label nDropped = 0;
+			for (std::size_t i = 0; i < keepFlag.size(); ++i)
+			{
+				if (keepFlag[i] && !reached[i]) ++nDropped;
+				keepFlag[i] = keepFlag[i] && reached[i];
+			}
+			std::cout << "cmsh extractor: locationInMesh BFS kept group, dropped "
+			          << nDropped << " disconnected leaves.\n";
+		}
+	}
+
+	oct_.forEachLeaf([&](const XFoam_CMshOctreeCube& c) {
+		if (keepFlag[static_cast<std::size_t>(c.leafIdx)])
 		{
 			leafToCell[static_cast<std::size_t>(c.leafIdx)] = static_cast<int>(cells.size());
 			cells.push_back(&c);
