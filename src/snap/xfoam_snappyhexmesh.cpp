@@ -1,4 +1,5 @@
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
+#include "XFoam/snap/xfoam_pointconstraint.h"
 
 #include "XFoam/block/xfoam_blockmesh.h"
 #include "XFoam/snap/xfoam_hex8ref.h"
@@ -494,19 +495,19 @@ inline XFoam_Vector3D paramToWorld(
 
 bool XFoam_SnappyHexMesh::run(
 	const XFoam_BlockMesh& bg,
-	const XFoam_TriSurface& stl,
-	const XFoam_FileName& outPolyMeshDir,
-	Stats& stats) const
+	const XFoam_BrepBase&  surf,
+	const XFoam_FileName&  outPolyMeshDir,
+	Stats&                 stats) const
 {
-	std::vector<const XFoam_TriSurface*> stls(1, &stl);
-	return run(bg, stls, outPolyMeshDir, stats);
+	std::vector<const XFoam_BrepBase*> surfs(1, &surf);
+	return run(bg, surfs, outPolyMeshDir, stats);
 }
 
 bool XFoam_SnappyHexMesh::run(
-	const XFoam_BlockMesh& bg,
-	const std::vector<const XFoam_TriSurface*>& stls,
-	const XFoam_FileName& outPolyMeshDir,
-	Stats& stats) const
+	const XFoam_BlockMesh&                       bg,
+	const std::vector<const XFoam_BrepBase*>&    stls,
+	const XFoam_FileName&                        outPolyMeshDir,
+	Stats&                                       stats) const
 {
 	const XFoam_Label nSurf = static_cast<XFoam_Label>(stls.size());
 	const XFoam_Label nSpec = static_cast<XFoam_Label>(surfaces_.size());
@@ -553,9 +554,9 @@ bool XFoam_SnappyHexMesh::run(
 		std::cerr << "snappy: all STLs are empty or null.\n";
 		return false;
 	}
-	if (!refine_.hasLocationInMesh)
+	if (!refine_.hasLocationInMesh())
 	{
-		std::cerr << "snappy: castellatedMeshControls.locationInMesh required.\n";
+		std::cerr << "snappy: castellatedMeshControls.locationsInMesh (or legacy locationInMesh) required.\n";
 		return false;
 	}
 
@@ -667,7 +668,37 @@ bool XFoam_SnappyHexMesh::run(
 		}
 		return false;
 	};
-	const bool locInside = insideAny(refine_.locationInMesh);
+	// 多 region 选择 (locationsInMesh)：每个 location 编一个 per-surface inside/outside
+	// bitmask（第 si 位 = stls[si]->contains(p)）。cell 中心如果与任一 location 同 bitmask
+	// 就保留 —— 这把 "outside all surfaces / inside surface-A only / inside surface-B only" 等
+	// 互不相交的 region 切开，单 location + 单 surface 退化成旧 insideAny 比较。
+	// 64 位封顶（refinementSurfaces 上限自然落在这个数量级以内）。
+	using RegionMask = uint64_t;
+	if (nSurf > 64)
+	{
+		std::cerr << "snappy: refinementSurfaces.size()=" << nSurf
+		          << " > 64 不被 region-mask 支持。\n";
+		return false;
+	}
+	auto regionMask = [&](const XFoam_Vector3D& p) -> RegionMask {
+		RegionMask m = 0;
+		for (XFoam_Label si = 0; si < nSurf; ++si)
+		{
+			if (stls[si] && !stls[si]->empty() && stls[si]->contains(p))
+			{
+				m |= (RegionMask(1) << si);
+			}
+		}
+		return m;
+	};
+	std::vector<RegionMask> locMasks;
+	locMasks.reserve(refine_.locationsInMesh.size());
+	for (size_t li = 0; li < refine_.locationsInMesh.size(); ++li)
+	{
+		locMasks.push_back(regionMask(refine_.locationsInMesh[li]));
+	}
+	// 兼容旧 stats / sample 路径下"insideAny(loc)"概念：取首 location 的旧布尔。
+	(void)insideAny;  // 仅供调试/未来 patch 名生成；当前驱动改走 bitmask。
 
 	const int nBufferLayers = std::max(0, static_cast<int>(refine_.nCellsBetweenLevels) - 1);
 
@@ -704,7 +735,12 @@ bool XFoam_SnappyHexMesh::run(
 
 		oct.cullByPredicate(
 			[&](const Leaf& l) -> bool {
-				return insideAny(leafCentroidWorldB(B, l)) != locInside;
+				const RegionMask cm = regionMask(leafCentroidWorldB(B, l));
+				for (size_t li = 0; li < locMasks.size(); ++li)
+				{
+					if (locMasks[li] == cm) return false;
+				}
+				return true;
 			});
 
 		const XFoam_Label kept = oct.assignCellIds();
@@ -1038,6 +1074,11 @@ bool XFoam_SnappyHexMesh::run(
 	if (phases_.snap)
 	{
 		std::vector<unsigned char> snapped(pts.size(), 0);
+		// Snap #9 pointConstraint：每个 boundary 点记录剩余 DOF。free=interior，
+		// plane=普通 surface snap，line=feature edge snap，fixed=feature vertex snap。
+		// 多 surface 同一点会被多次 combine（取约束更严的那个），与 OF 的 pointConstraint
+		// 累计行为一致。
+		std::vector<XFoam_PointConstraint> ptCons(pts.size());
 		// 始终保存 snap 前 pts：motionSmoother 与 validate-and-relax 都要用它做位移基准 /
 		// 回退到 grid 上。这份拷贝在 L=6 cylinder1 case 大约 2 MB（250k pts × 8B floats × 3）。
 		const XFoam_Label nInternal = snap_.nSmoothInternal;
@@ -1068,20 +1109,35 @@ bool XFoam_SnappyHexMesh::run(
 					XFoam_Vector3D closest, normal;
 					stls[si]->closestPointAndNormal(pts[v], closest, normal);
 
+					// 默认 plane 约束（normal 已被 STL 归一化）。feature 命中会被升级。
+					XFoam_PointConstraint pc = XFoam_PointConstraint::plane(normal);
+
 					if (hasFeatures && v < static_cast<int>(ptCellSize.size()))
 					{
 						const XFoam_Scalar radius = featureRadiusFactor * ptCellSize[v];
 						XFoam_Vector3D fq;
-						const auto kind = stls[si]->closestFeature(pts[v], radius, fq);
-						if (kind == XFoam_TriSurface::FeatureKind::Vertex)
+						XFoam_Vector3D ft;
+						const auto kind = stls[si]->closestFeature(pts[v], radius, fq, ft);
+						if (kind == XFoam_BrepBase::FeatureKind::Vertex)
 						{
 							closest = fq;
 							++stats.nFeatureVertexSnaps;
+							pc = XFoam_PointConstraint::fixed();
 						}
-						else if (kind == XFoam_TriSurface::FeatureKind::Edge)
+						else if (kind == XFoam_BrepBase::FeatureKind::Edge)
 						{
 							closest = fq;
 							++stats.nFeatureEdgeSnaps;
+							// 用 closestFeature 回填的 unit edge 切向构造 line 约束。
+							// 退化 (|t|==0) 时落回 plane 防御，避免 line(0) 失效。
+							if (ft.mag() > 0)
+							{
+								pc = XFoam_PointConstraint::line(ft);
+							}
+							else
+							{
+								pc = XFoam_PointConstraint::plane(normal);
+							}
 						}
 					}
 
@@ -1089,7 +1145,23 @@ bool XFoam_SnappyHexMesh::run(
 					if (d > stats.maxSnapDistance) stats.maxSnapDistance = d;
 					pts[v] = closest;
 					++stats.nSnappedPoints;
+
+					ptCons[static_cast<size_t>(v)].combine(pc);
 				}
+			}
+		}
+
+		// 把所有 snapped 点的最终 ptCons 按 DOF 分桶计数，给到 stats（便于 sample/test
+		// 校验：plane + line + fixed == 总 snapped 点数）。
+		for (size_t v = 0; v < pts.size(); ++v)
+		{
+			if (!snapped[v]) continue;
+			switch (ptCons[v].nConstraints())
+			{
+				case 1: ++stats.nPlaneConstrained; break;
+				case 2: ++stats.nLineConstrained;  break;
+				case 3: ++stats.nFixedConstrained; break;
+				default: break;
 			}
 		}
 
@@ -1300,10 +1372,23 @@ bool XFoam_SnappyHexMesh::run(
 				}
 				// 把每个被标记的点拉回 origPts 一半；snapped 点也照样收缩，避免局部高位移
 				// 把相邻 cell 拽成负体。
+				// Snap #9 pointConstraint：对 boundary snapped 点，relax delta 必须先经过
+				// constrainDisplacement 投影到允许 DOF（plane: 沿 surface 切向；line: 沿
+				// edge 切向；fixed: 0）。这避免 relax 把点从 feature 上拽下来，但仍允许
+				// 它在 surface 内滑动来打开负体积 cell。
 				for (size_t v = 0; v < nPts; ++v)
 				{
 					if (!needRelax[v]) continue;
-					pts[v] = origPts[v] + (pts[v] - origPts[v]) * kRelaxAlpha;
+					const XFoam_Vector3D toOrig = origPts[v] - pts[v];
+					XFoam_Vector3D step(
+						toOrig.x() * kRelaxAlpha,
+						toOrig.y() * kRelaxAlpha,
+						toOrig.z() * kRelaxAlpha);
+					if (snapped[v])
+					{
+						step = ptCons[v].constrainDisplacement(step);
+					}
+					pts[v] = pts[v] + step;
 				}
 				++relaxUsed;
 				findBadCells(badCells, minVol);
@@ -1325,6 +1410,390 @@ bool XFoam_SnappyHexMesh::run(
 			}
 			stats.maxSnapDistance = maxMove;
 		}
+	}
+
+	// ----- 8.5. addLayers：按 layers { patch { nSurfaceLayers N; } } 在指定 patch 上扩展 prism 层 -----
+	// 与 OpenFOAM-13 src/mesh/snappyHexMesh/snappyLayerDriver 的核心思路一致，但大幅简化：
+	//
+	// 几何模型（关键决定）：boundary point 真的被"拉回 mesh 内部"，让原 cell 让出 totalThickness
+	// 的薄壳给 prism 层填充。具体：
+	//   * 每个 patch 唯一点 P：保存 P_stl = pts[P]；在 pts 末尾追加 N 个新点 ringV[k] (k=0..N-1)，
+	//     位置 = P_stl - n_p · cumT[k]，其中 cumT[0]=0、cumT[k]=Σ_{j<k} t_j、cumT[N]=totalThickness。
+	//   * 然后把 pts[P] 平移到 P_stl - n_p · cumT[N]（最深 ring N 位置）。
+	//   * 这样 P 共享给 owner cell C 的 ≥1 张非 patch 面在 polyMesh 里仍只是「顶点坐标改了」，
+	//     C 的体积按散度定理重新求即可；不需要重写 C 的 face 列表。
+	//
+	// 拓扑构造：
+	//   * 原 boundary face F 用 P，所以现在 F 位于 ring N。F.neighbour = layerCell_{N-1}（最里
+	//     一层）。F.fromGridBoundary = false，进 internalIdx。
+	//   * 每层 k=0..N-1 加一个 prism cell layerCell_k：
+	//       - bottom face F_k 用 ringV[*][k]：owner = layerCell_k；k=0 时 neighbour=-1（新 patch
+	//         boundary），k>0 时 neighbour = layerCell_{k-1}。
+	//       - top face：k=N-1 时 = 原 F；k<N-1 时 = F_{k+1}（即下一层的 bottom）。
+	//   * side quad：沿 F 每条 edge (v_i, v_j) 各加 N 张 quad，第 k 张连接 ringV[v_*][k] 与
+	//     ringV[v_*][k+1]（k=N-1 时用 P 替代 ringV[v_*][N]）；patch 内共享 edge → 同 quad 被两
+	//     个 layer cell 共享（FaceKey dedup）；patch 边缘 edge → quad 落入 walls patch。
+	//
+	// 已移植：
+	//   * relativeSizes=true 时，每个 vertex 的 firstLayerThickness 缩放为 layer_.firstLayerThickness
+	//     × sqrt(avg incident patch face area)（局部 cell-size 代理），层厚跟着曲率/网格密度变化。
+	//   * layer cell 体积扫描：新生成的 prism cell 若 V≤0 计入 stats.nLayerCellsNegative，
+	//     最小体积写 stats.minLayerCellVolume，调用方可据此告警 / 关层。
+	// 未移植项（与 OF 显著差异，留作后续 TODO）：
+	//   * medial axis / nGrow / nBufferCellsNoExtrude / nSmoothNormals / nSmoothThickness；
+	//   * 凹凸自检 / layer collapse / thickness-to-cell-size 限制（重叠时会出负体积，目前仅在
+	//     stats.nLayerCellsNegative 里报警，不回退 / 不 collapse）；
+	//   * 多 patch 共享同一个 point 时合并 normal 的策略（这里每 patch 独立处理，跨 patch 不
+	//     共享 layer vertex；共享点会被各自 patch 平移，可能产生几何冲突）。
+	if (phases_.addLayers && !layer_.perPatchLayers.empty() && layer_.firstLayerThickness > 0)
+	{
+		using LayerEdgeKey = std::pair<int, int>;
+		struct LayerEdgeKeyHash
+		{
+			size_t operator()(const LayerEdgeKey& k) const noexcept
+			{
+				const size_t h1 = std::hash<int>()(k.first);
+				const size_t h2 = std::hash<int>()(k.second);
+				return h1 * 0x9E3779B97F4A7C15ULL ^ h2;
+			}
+		};
+
+		// 把 perPatchLayers 的 dict key 解到 stlIdxBySurf 的下标。仅匹配 STL surface patch；
+		// walls / 其它 default patch 暂不支持 prism 扩张。
+		std::vector<std::pair<XFoam_Label, XFoam_Label>> patchLayerJobs;
+		for (XFoam_Label si = 0; si < nSurf; ++si)
+		{
+			const XFoam_Word& sname = surfaces_[si].name;
+			auto it = layer_.perPatchLayers.find(sname);
+			if (it == layer_.perPatchLayers.end()) continue;
+			const XFoam_Label nL = it();
+			if (nL <= 0) continue;
+			if (stlIdxBySurf[static_cast<size_t>(si)].empty()) continue;
+			patchLayerJobs.emplace_back(si, nL);
+		}
+
+		// 全部新增 layer cell 的下标范围（用于最后做体积扫描）。
+		const int layerCellStartId = static_cast<int>(stats.nKeptCells);
+		// 取消有效 layer job 时不做任何事 → 走原路径。
+		for (size_t job = 0; job < patchLayerJobs.size(); ++job)
+		{
+			const XFoam_Label si = patchLayerJobs[job].first;
+			const XFoam_Label nL = patchLayerJobs[job].second;
+			std::vector<int>& patchFaces = stlIdxBySurf[static_cast<size_t>(si)];
+
+			// (a) 几何累计层厚向量。relativeSizes=true 时层厚要按 per-vertex local cell size
+			// 缩放，所以我们不算全局 cumT，而是只算「相对量」 cumRel[k] = Σ_{j<k} r^j，最终
+			// 每个 vertex 用 cumT_v[k] = scale_v · firstLayerThickness · cumRel[k]。
+			// 全局 abs 模式 (relativeSizes=false) 取 scale_v ≡ 1 → 与旧行为完全一致。
+			std::vector<XFoam_Scalar> cumRel(static_cast<size_t>(nL + 1), 0);
+			for (XFoam_Label k = 0; k < nL; ++k)
+			{
+				const XFoam_Scalar rk = std::pow(
+					static_cast<XFoam_Scalar>(layer_.expansionRatio), static_cast<XFoam_Scalar>(k));
+				cumRel[static_cast<size_t>(k + 1)] = cumRel[static_cast<size_t>(k)] + rk;
+			}
+
+			// (b) 收集 patch 上每个 unique vertex 的 area-weighted outward 法向，
+			// 同时累计 (面积总和, 入射 face 数)。relativeSizes 用的 local cell-size 取
+			// sqrt(avg incident face area) — 比 face 边长更稳。
+			auto faceAreaVec = [&](const FInfo& f) -> XFoam_Vector3D {
+				XFoam_Vector3D a(0, 0, 0);
+				const int n = static_cast<int>(f.verts.size());
+				if (n < 3) return a;
+				const XFoam_Vector3D v0 = pts[f.verts[0]];
+				for (int i = 1; i + 1 < n; ++i)
+				{
+					const XFoam_Vector3D e1 = pts[f.verts[i]] - v0;
+					const XFoam_Vector3D e2 = pts[f.verts[i + 1]] - v0;
+					a.x() += static_cast<XFoam_Scalar>(0.5) * (e1.y() * e2.z() - e1.z() * e2.y());
+					a.y() += static_cast<XFoam_Scalar>(0.5) * (e1.z() * e2.x() - e1.x() * e2.z());
+					a.z() += static_cast<XFoam_Scalar>(0.5) * (e1.x() * e2.y() - e1.y() * e2.x());
+				}
+				return a;
+			};
+			std::unordered_map<int, XFoam_Vector3D> pNormSum;
+			std::unordered_map<int, XFoam_Scalar> pAreaSum;
+			std::unordered_map<int, int> pIncCount;
+			pNormSum.reserve(patchFaces.size() * 4);
+			pAreaSum.reserve(patchFaces.size() * 4);
+			pIncCount.reserve(patchFaces.size() * 4);
+			for (int fi : patchFaces)
+			{
+				const XFoam_Vector3D a = faceAreaVec(finalFaces[fi]);
+				const XFoam_Scalar area = a.mag();
+				for (int v : finalFaces[fi].verts)
+				{
+					auto itp = pNormSum.find(v);
+					if (itp == pNormSum.end()) pNormSum.emplace(v, a);
+					else { itp->second.x() += a.x(); itp->second.y() += a.y(); itp->second.z() += a.z(); }
+					auto ita = pAreaSum.find(v);
+					if (ita == pAreaSum.end()) pAreaSum.emplace(v, area);
+					else ita->second += area;
+					auto itc = pIncCount.find(v);
+					if (itc == pIncCount.end()) pIncCount.emplace(v, 1);
+					else ++itc->second;
+				}
+			}
+			// (c) ringV[v][k] = ring k 上的 vertex id（k=0..nL-1 为新点；k=nL 用原 v）。
+			std::unordered_map<int, std::vector<int>> ringV;
+			ringV.reserve(pNormSum.size());
+			for (auto& kv : pNormSum)
+			{
+				const int curV = kv.first;
+				const XFoam_Vector3D rawN = kv.second;
+				const XFoam_Scalar mag = rawN.mag();
+				if (mag <= 0)
+				{
+					// 退化点：normal 为 0；把 ringV 全设成 curV，使生成的 prism cell 退化为 0
+					// 体积（不会导致 polyMesh 写入失败，但会被 validate-and-relax 标 bad）。
+					ringV.emplace(curV, std::vector<int>(static_cast<size_t>(nL), curV));
+					continue;
+				}
+				const XFoam_Scalar inv = static_cast<XFoam_Scalar>(1) / mag;
+				const XFoam_Vector3D n(rawN.x() * inv, rawN.y() * inv, rawN.z() * inv);
+
+				// per-vertex 首层厚度。relativeSizes=true 时 scale_v = sqrt(avg incident face
+				// area)；false 时 scale_v = 1。
+				XFoam_Scalar t0_v = layer_.firstLayerThickness;
+				if (layer_.relativeSizes)
+				{
+					const auto ita = pAreaSum.find(curV);
+					const auto itc = pIncCount.find(curV);
+					if (ita != pAreaSum.end() && itc != pIncCount.end() && itc->second > 0)
+					{
+						const XFoam_Scalar avgA = ita->second / static_cast<XFoam_Scalar>(itc->second);
+						const XFoam_Scalar L = std::sqrt(std::max<XFoam_Scalar>(avgA, 0));
+						t0_v = layer_.firstLayerThickness * L;
+					}
+				}
+
+				const XFoam_Vector3D Pstl = pts[curV];
+				std::vector<int> rings(static_cast<size_t>(nL));
+				for (XFoam_Label k = 0; k < nL; ++k)
+				{
+					const XFoam_Scalar shift = t0_v * cumRel[static_cast<size_t>(k)];
+					const XFoam_Vector3D pNew(
+						Pstl.x() - n.x() * shift,
+						Pstl.y() - n.y() * shift,
+						Pstl.z() - n.z() * shift);
+					rings[static_cast<size_t>(k)] = static_cast<int>(pts.size());
+					pts.push_back(pNew);
+					++stats.nLayerPointsAdded;
+				}
+				// 把原 vertex 平移到 ring N（最深）。
+				const XFoam_Scalar totalShift = t0_v * cumRel[static_cast<size_t>(nL)];
+				pts[curV] = XFoam_Vector3D(
+					Pstl.x() - n.x() * totalShift,
+					Pstl.y() - n.y() * totalShift,
+					Pstl.z() - n.z() * totalShift);
+				ringV.emplace(curV, std::move(rings));
+			}
+			auto ringVid = [&](int v, XFoam_Label k) -> int {
+				if (k == nL) return v;
+				auto it = ringV.find(v);
+				if (it == ringV.end()) return v; // 不在 patch 上（理论上不会发生）
+				return it->second[static_cast<size_t>(k)];
+			};
+
+			// (d) 拓扑构造：原 F 在 ring N，再为每层加 bottom face + side quads。
+			std::vector<int> newOutermostFaces; // ring 0 face → 替换 patchFaces
+			newOutermostFaces.reserve(patchFaces.size());
+
+			// per-edge / per-layer 共享：sideQuad[(min(vi,vj),max(vi,vj),k)] = faceId
+			// 这里把 edge key 与 ring k 嵌成 (a,b) where a = min,vj 压成 pair<int,int>，k 单独
+			// 用一个 vector 数组按层划分（避免三元 key 哈希）。
+			std::vector<std::unordered_map<LayerEdgeKey, int, LayerEdgeKeyHash>>
+				sideKeyPerLayer(static_cast<size_t>(nL));
+
+			for (int origFi : patchFaces)
+			{
+				FInfo& origF = finalFaces[origFi];
+				const int upperCell = origF.owner;
+				const int nV = static_cast<int>(origF.verts.size());
+
+				// 当前迭代：layerCell_k = nKeptCells + 全局 layer cell 偏移；记下首个，循环 ++ 用
+				const int baseCellId = static_cast<int>(stats.nKeptCells) + stats.nLayerCellsAdded;
+				const int innermostLayerCell = baseCellId + (nL - 1);
+				stats.nLayerCellsAdded += nL;
+
+				// 原 F 由 boundary → internal：owner 上层 cell, neighbour innermostLayerCell。
+				origF.neighbour = innermostLayerCell;
+				origF.fromGridBoundary = false;
+				internalIdx.push_back(origFi);
+
+				// 逐层加 bottom face（ring k）+ 链 cell 关系。
+				int prevBottomFi = -1; // F_{k+1} from previous iter (used as top for layerCell_k)
+				for (XFoam_Label kk = nL - 1; kk >= 0; --kk)
+				{
+					const int layerCell = baseCellId + static_cast<int>(kk);
+					// bottom face F_kk 顶点 = ringVid(orig vert, kk)
+					FInfo bot;
+					bot.verts.reserve(nV);
+					for (int vid : origF.verts) bot.verts.push_back(ringVid(vid, kk));
+					bot.owner = layerCell;
+					bot.neighbour = (kk == 0) ? -1 : (baseCellId + static_cast<int>(kk - 1));
+					bot.fromGridBoundary = false;
+					const int botFi = static_cast<int>(finalFaces.size());
+					finalFaces.push_back(std::move(bot));
+					++stats.nLayerFacesAdded;
+					if (kk > 0)
+					{
+						internalIdx.push_back(botFi);
+					}
+					else
+					{
+						newOutermostFaces.push_back(botFi); // 进 stlIdxBySurf[si]
+					}
+					// 调试时方便：标记前一个 bottom（不真正使用）
+					prevBottomFi = botFi;
+					(void)prevBottomFi;
+				}
+
+				// side quads：每条 edge (v_i, v_j) × 每层 k=0..nL-1。
+				for (int i = 0; i < nV; ++i)
+				{
+					const int v_i = origF.verts[i];
+					const int v_j = origF.verts[(i + 1) % nV];
+					const LayerEdgeKey ek = (v_i < v_j)
+						? std::make_pair(v_i, v_j)
+						: std::make_pair(v_j, v_i);
+
+					for (XFoam_Label kk = 0; kk < nL; ++kk)
+					{
+						auto& sm = sideKeyPerLayer[static_cast<size_t>(kk)];
+						auto sit = sm.find(ek);
+						const int layerCell = baseCellId + static_cast<int>(kk);
+						const int vi_outer = ringVid(v_i, kk);     // ring k (closer to STL outside)
+						const int vj_outer = ringVid(v_j, kk);
+						const int vi_inner = ringVid(v_i, kk + 1); // ring k+1 (deeper inward)
+						const int vj_inner = ringVid(v_j, kk + 1);
+
+						if (sit == sm.end())
+						{
+							FInfo side;
+							// CCW winding viewed from "outside" of layerCell (outward of patch sideways):
+							// {vi_outer, vj_outer, vj_inner, vi_inner}
+							side.verts = {vi_outer, vj_outer, vj_inner, vi_inner};
+							side.owner = layerCell;
+							side.neighbour = -1;
+							side.fromGridBoundary = true; // patch 边缘 quad 暂归 walls
+							const int sFi = static_cast<int>(finalFaces.size());
+							finalFaces.push_back(std::move(side));
+							sm.emplace(ek, sFi);
+							++stats.nLayerFacesAdded;
+						}
+						else
+						{
+							FInfo& side = finalFaces[sit->second];
+							side.neighbour = layerCell;
+							side.fromGridBoundary = false;
+							internalIdx.push_back(sit->second);
+						}
+					}
+				}
+			}
+
+			// 把 patch 边缘 side quad（最后没找到 partner）补进 walls。
+			for (XFoam_Label kk = 0; kk < nL; ++kk)
+			{
+				for (auto& kv : sideKeyPerLayer[static_cast<size_t>(kk)])
+				{
+					const int sFi = kv.second;
+					if (finalFaces[sFi].neighbour == -1 && finalFaces[sFi].fromGridBoundary)
+					{
+						wallsIdx.push_back(sFi);
+					}
+				}
+			}
+
+			// 用新的 ring-0 bottom face 替换原 patch face list。
+			patchFaces = std::move(newOutermostFaces);
+			++stats.nLayerPatches;
+		}
+
+		// 全部 layer patch 处理完后再把 layer cell 数加到 nKeptCells。
+		stats.nKeptCells += stats.nLayerCellsAdded;
+
+		// (e) layer cell quality 扫描：反向收集每个新 layer cell 的 face 列表 → 散度定理
+		// 求体积。≤0 计入 stats.nLayerCellsNegative；同时记录最小体积。这是 OF 的
+		// snappyLayerDriver::checkAndRevertLayers 的极简版（不会 revert，仅报警）。
+		if (stats.nLayerCellsAdded > 0)
+		{
+			const int layerCellEndId = static_cast<int>(stats.nKeptCells);
+			std::vector<std::vector<int>> lcFaces(static_cast<size_t>(stats.nLayerCellsAdded));
+			for (int fi = 0; fi < static_cast<int>(finalFaces.size()); ++fi)
+			{
+				const FInfo& f = finalFaces[fi];
+				if (f.owner >= layerCellStartId && f.owner < layerCellEndId)
+				{
+					lcFaces[static_cast<size_t>(f.owner - layerCellStartId)].push_back(fi);
+				}
+				if (f.neighbour >= layerCellStartId && f.neighbour < layerCellEndId)
+				{
+					lcFaces[static_cast<size_t>(f.neighbour - layerCellStartId)].push_back(fi);
+				}
+			}
+			XFoam_Scalar minVol = std::numeric_limits<XFoam_Scalar>::max();
+			XFoam_Label nNeg = 0;
+			for (int c = 0; c < stats.nLayerCellsAdded; ++c)
+			{
+				const int globalC = layerCellStartId + c;
+				XFoam_Scalar vol = 0;
+				for (int fi : lcFaces[static_cast<size_t>(c)])
+				{
+					const FInfo& f = finalFaces[fi];
+					const int n = static_cast<int>(f.verts.size());
+					if (n < 3) continue;
+					const XFoam_Vector3D v0 = pts[f.verts[0]];
+					XFoam_Vector3D af(0, 0, 0);
+					XFoam_Vector3D cf(0, 0, 0);
+					XFoam_Scalar totalArea = 0;
+					for (int i = 1; i + 1 < n; ++i)
+					{
+						const XFoam_Vector3D v1 = pts[f.verts[i]];
+						const XFoam_Vector3D v2 = pts[f.verts[i + 1]];
+						const XFoam_Vector3D e1 = v1 - v0;
+						const XFoam_Vector3D e2 = v2 - v0;
+						const XFoam_Vector3D triN(
+							static_cast<XFoam_Scalar>(0.5) * (e1.y() * e2.z() - e1.z() * e2.y()),
+							static_cast<XFoam_Scalar>(0.5) * (e1.z() * e2.x() - e1.x() * e2.z()),
+							static_cast<XFoam_Scalar>(0.5) * (e1.x() * e2.y() - e1.y() * e2.x()));
+						const XFoam_Scalar triA = triN.mag();
+						const XFoam_Vector3D triC = (v0 + v1 + v2) * (static_cast<XFoam_Scalar>(1.0 / 3.0));
+						af = af + triN;
+						cf = cf + triC * triA;
+						totalArea += triA;
+					}
+					if (totalArea <= 0) continue;
+					cf = cf * (static_cast<XFoam_Scalar>(1) / totalArea);
+					const XFoam_Scalar sign = (f.owner == globalC)
+						? static_cast<XFoam_Scalar>(1)
+						: static_cast<XFoam_Scalar>(-1);
+					vol += sign * (cf.x() * af.x() + cf.y() * af.y() + cf.z() * af.z());
+				}
+				vol *= static_cast<XFoam_Scalar>(1.0 / 3.0);
+				if (vol < minVol) minVol = vol;
+				if (vol <= 0) ++nNeg;
+			}
+			stats.nLayerCellsNegative = nNeg;
+			stats.minLayerCellVolume = (minVol == std::numeric_limits<XFoam_Scalar>::max())
+				? 0 : minVol;
+		}
+
+		// addLayers 改动 wallsIdx / stlIdxBySurf / internalIdx 的 owner 序，统一重排。
+		std::sort(wallsIdx.begin(), wallsIdx.end(),
+			[&](int a, int b) { return finalFaces[a].owner < finalFaces[b].owner; });
+		for (auto& v : stlIdxBySurf)
+		{
+			std::sort(v.begin(), v.end(),
+				[&](int a, int b) { return finalFaces[a].owner < finalFaces[b].owner; });
+		}
+		std::sort(internalIdx.begin(), internalIdx.end(), [&](int a, int b) {
+			const FInfo& fa = finalFaces[a];
+			const FInfo& fb = finalFaces[b];
+			if (fa.owner != fb.owner) return fa.owner < fb.owner;
+			return fa.neighbour < fb.neighbour;
+		});
 	}
 	// ----- 9. 装配 polyMesh 三大列表 + patch 表 -----
 	std::vector<std::vector<int>> facesOut;

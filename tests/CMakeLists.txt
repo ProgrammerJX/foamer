@@ -41,3 +41,9 @@ endfunction()
 xfoam_add_test_executable(foam-core)
 xfoam_add_test_executable(foam-mesh)
 xfoam_add_test_executable(foam-snap)
+# foam-topo 是 OCCT 路径的端到端测试；OCCT OFF 时跳过整个 group。
+# 里面的测试会用 BRepPrimAPI_MakeBox 自造 shape → 写 STEP → 回读 → 验证；
+# 因此运行不依赖任何外部 fixture。
+if(XFOAM_WITH_OCCT)
+    xfoam_add_test_executable(foam-topo)
+endif()

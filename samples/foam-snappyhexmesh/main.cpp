@@ -17,7 +17,7 @@
 #include "XFoam/XFoam_API.h"
 #include "XFoam/block/xfoam_blockmesh.h"
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
-#include "XFoam/snap/xfoam_trisurface.h"
+#include "XFoam/topo/xfoam_vbrep.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_dictionary.h"
 #include "XFoam/utilities/xfoam_error.h"
@@ -26,7 +26,9 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -118,8 +120,11 @@ int main(int argc, char** argv)
 			std::cerr << "No refinementSurfaces in snappyHexMeshDict.\n";
 			return 1;
 		}
-		std::vector<XFoam_TriSurface> stlStorage(specs.size());
-		std::vector<const XFoam_TriSurface*> stlPtrs(specs.size(), nullptr);
+		// VBrep 接管原 XFoam_TriSurface 的角色：自身读 STL，buildFeatures，并作为
+		// XFoam_BrepBase 喂给 snappy。注意 VBrep 不可拷贝（持有内部 cache），
+		// 用 std::vector<std::unique_ptr<...>> 避免触发拷贝。
+		std::vector<std::unique_ptr<XFoam_VBrep>> stlStorage(specs.size());
+		std::vector<const XFoam_BrepBase*>        stlPtrs(specs.size(), nullptr);
 		for (size_t si = 0; si < specs.size(); ++si)
 		{
 			fs::path stlPath;
@@ -148,35 +153,45 @@ int main(int argc, char** argv)
 				std::cerr << "STL not found: " << stlPath.string() << "\n";
 				return 1;
 			}
-			if (!stlStorage[si].read(stlPath.string()))
+			stlStorage[si].reset(new XFoam_VBrep());
+			try
 			{
-				std::cerr << "failed to read STL: " << stlPath.string() << "\n";
+				stlStorage[si]->readStlAscii(XFoam_String(stlPath.string()));
+			}
+			catch (const XFoam_Error& e)
+			{
+				std::cerr << "failed to read STL: " << stlPath.string()
+				          << " (" << e.what() << ")\n";
 				return 1;
 			}
-			// Snap #7：dict 打开 implicitFeatureSnap 时帮 STL 抽一次 feature。
-			// snappy.run 自身不持有 STL，且 STL 引用是 const，必须由 caller 完成 build。
+			// Snap #7：dict 打开 implicitFeatureSnap 时让 VBrep 抽一次 feature。
+			// VBrep::buildFeatures 内部会调 buildEdgesFromFaces 并物化 feature 缓存。
 			if (snappy.snapParams().implicitFeatureSnap)
 			{
-				stlStorage[si].buildFeatures(snappy.refineParams().resolveFeatureAngle);
+				stlStorage[si]->buildFeatures(snappy.refineParams().resolveFeatureAngle);
 			}
-			stlPtrs[si] = &stlStorage[si];
-			std::cout << "       " << stlStorage[si].size() << " tris, bbox ("
-			          << stlStorage[si].bounds().min().x() << ',' << stlStorage[si].bounds().min().y() << ',' << stlStorage[si].bounds().min().z() << ") .. ("
-			          << stlStorage[si].bounds().max().x() << ',' << stlStorage[si].bounds().max().y() << ',' << stlStorage[si].bounds().max().z() << ")"
+			stlPtrs[si] = stlStorage[si].get();
+			const auto bb = stlStorage[si]->bounds();
+			std::cout << "       " << stlStorage[si]->nFaces() << " tris, bbox ("
+			          << bb.min().x() << ',' << bb.min().y() << ',' << bb.min().z() << ") .. ("
+			          << bb.max().x() << ',' << bb.max().y() << ',' << bb.max().z() << ")"
 			          << "  level=(" << specs[si].minLevel << ' ' << specs[si].maxLevel << ")";
 			if (snappy.snapParams().implicitFeatureSnap)
 			{
-				std::cout << "  features=(" << stlStorage[si].nFeatureEdges()
-				          << " edges, " << stlStorage[si].nFeatureVertices() << " verts)";
+				std::cout << "  features=(" << stlStorage[si]->nFeatureEdges()
+				          << " edges, " << stlStorage[si]->nFeatureVertices() << " verts)";
 			}
 			std::cout << "\n";
 		}
 
 		std::cout << "Refinement level   : " << snappy.globalRefinementLevel()
-		          << "  (locationInMesh="
-		          << snappy.refineParams().locationInMesh.x() << ','
-		          << snappy.refineParams().locationInMesh.y() << ','
-		          << snappy.refineParams().locationInMesh.z() << ')' << std::endl;
+		          << "  (locationsInMesh n=" << snappy.refineParams().locationsInMesh.size();
+		for (size_t li = 0; li < snappy.refineParams().locationsInMesh.size(); ++li)
+		{
+			const auto& p = snappy.refineParams().locationsInMesh[li];
+			std::cout << ' ' << '(' << p.x() << ',' << p.y() << ',' << p.z() << ')';
+		}
+		std::cout << ')' << std::endl;
 
 		XFoam_SnappyHexMesh::Stats stats;
 		if (!snappy.run(bg, stlPtrs, toX(outDir), stats))
@@ -210,6 +225,20 @@ int main(int argc, char** argv)
 			std::cout << "Feature snaps      : "
 			          << stats.nFeatureVertexSnaps << " vertex + "
 			          << stats.nFeatureEdgeSnaps << " edge\n";
+		}
+		if (stats.nSnappedPoints > 0)
+		{
+			std::cout << "Point constraints  : "
+			          << stats.nPlaneConstrained << " plane / "
+			          << stats.nLineConstrained << " line / "
+			          << stats.nFixedConstrained << " fixed\n";
+		}
+		if (stats.nLayerPatches > 0)
+		{
+			std::cout << "Layers added       : " << stats.nLayerPatches << " patch(es), +"
+			          << stats.nLayerCellsAdded << " cells, +"
+			          << stats.nLayerPointsAdded << " points, +"
+			          << stats.nLayerFacesAdded << " faces\n";
 		}
 		if (stats.nBadCellsInitial > 0 || stats.nRelaxIterationsUsed > 0)
 		{

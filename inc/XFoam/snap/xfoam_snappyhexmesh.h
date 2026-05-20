@@ -18,7 +18,7 @@
 #include "XFoam/snap/xfoam_layerparameters.h"
 #include "XFoam/snap/xfoam_refinementparameters.h"
 #include "XFoam/snap/xfoam_snapparameters.h"
-#include "XFoam/snap/xfoam_trisurface.h"
+#include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/utilities/xfoam_autoptr.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_types.h"
@@ -28,6 +28,7 @@
 
 class XFoam_BlockMesh;
 class XFoam_Dictionary;
+class XFoam_VBrep;
 
 /*---------------------------------------------------------------------------*\
                     Class XFoam_SnappyHexMesh Declaration
@@ -67,6 +68,20 @@ public:
 		XFoam_Scalar maxInternalSmoothMove = 0;  ///< motionSmoother 对内部点造成的最大移动距离
 		XFoam_Label nFeatureEdgeSnaps = 0;       ///< Snap #7 替换为 feature edge 投影的 boundary 点数
 		XFoam_Label nFeatureVertexSnaps = 0;     ///< Snap #7 替换为 feature vertex 的 boundary 点数
+
+		// Snap #9 pointConstraint 分类统计；relax / 内部 smoother 都按这份 DOF 约束做投影。
+		XFoam_Label nPlaneConstrained = 0;       ///< 单 plane 约束的 boundary 点数（普通 surface snap）
+		XFoam_Label nLineConstrained  = 0;       ///< 沿 line 约束的 boundary 点数（feature edge / 双 plane）
+		XFoam_Label nFixedConstrained = 0;       ///< 完全锁死的 boundary 点数（feature vertex / 三 plane）
+
+		// addLayers 阶段（按 patch 名启用 layers { sphere { nSurfaceLayers N; } }）。
+		// 未启用 / 没匹配 patch 时全部保持 0。
+		XFoam_Label nLayerPatches = 0;           ///< 实际跑过 layer 扩张的 patch 数
+		XFoam_Label nLayerCellsAdded = 0;        ///< 新增的 prism layer cell 总数
+		XFoam_Label nLayerPointsAdded = 0;       ///< 新增的 point 数（每层 × patch 上 unique 点数）
+		XFoam_Label nLayerFacesAdded = 0;        ///< 新增的 face 数（含 side quads + bottom faces）
+		XFoam_Label nLayerCellsNegative = 0;     ///< 新增 layer cell 中 V≤0 的数量（用作 quality 报警）
+		XFoam_Scalar minLayerCellVolume = 0;     ///< 所有新增 layer cell 的最小体积
 
 		// Snap #6 validate-and-relax：捕捉 snap 之后还残留的负体积/退化 cell。relax 没生效时
 		// 这些字段保持 0。
@@ -122,20 +137,23 @@ public:
 	///      snap 时该 patch 上的点投到对应 STL 的最近点。
 	///   6) 把全局点表、faces、owner/neighbour、patch 表（walls + 各 STL）直接写出 polyMesh。
 	///
-	/// 多 surface 版本：调用方按 surfaces() 的顺序逐个 stl.read() 后传入；stls.size()
-	/// 必须等于 surfaces().size()。允许某项为 nullptr，那对应 surface 视为"不参与"。
+	/// 多 surface 版本：调用方按 surfaces() 的顺序逐个把 VBrep / MBrep 实例传进来；
+	/// surfs.size() 必须等于 surfaces().size()。允许某项为 nullptr，那对应 surface
+	/// 视为"不参与"。所有几何调用走 XFoam_BrepBase 虚函数 ── VBrep（BVH）和
+	/// MBrep（OCCT analytic）任意混搭都行。snap 阶段如需 feature 投影，需要先调
+	/// surfs[i]->buildFeatures(featureAngleDeg)。
 	bool run(
-		const XFoam_BlockMesh& bg,
-		const std::vector<const XFoam_TriSurface*>& stls,
-		const XFoam_FileName& outPolyMeshDir,
-		Stats& stats) const;
+		const XFoam_BlockMesh&                       bg,
+		const std::vector<const XFoam_BrepBase*>&    surfs,
+		const XFoam_FileName&                        outPolyMeshDir,
+		Stats&                                       stats) const;
 
-	/// 向后兼容：单 STL 的情况包装成 1 项 vector 后调多 surface 版本。
+	/// 向后兼容：单 surface 的情况包装成 1 项 vector 后调多 surface 版本。
 	bool run(
 		const XFoam_BlockMesh& bg,
-		const XFoam_TriSurface& stl,
-		const XFoam_FileName& outPolyMeshDir,
-		Stats& stats) const;
+		const XFoam_BrepBase&  surf,
+		const XFoam_FileName&  outPolyMeshDir,
+		Stats&                 stats) const;
 
 private:
 	XFoam_RefinementParameters refine_;
