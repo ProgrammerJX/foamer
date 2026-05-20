@@ -264,6 +264,141 @@ void XFoam_SnappyHexMesh::readPhaseFlags(const XFoam_Dictionary& dict)
 	(void)dict.readIfPresent(XFoam_Word("snap"), phases_.snap);
 	(void)dict.readIfPresent(XFoam_Word("addLayers"), phases_.addLayers);
 	(void)dict.readIfPresent(XFoam_Word("perFacePatches"), phases_.perFacePatches);
+	(void)dict.readIfPresent(XFoam_Word("fitFeatures"), phases_.fitFeatures);
+	(void)dict.readIfPresent(XFoam_Word("fitFeaturesMaxLevelBump"),
+	                         phases_.fitFeaturesMaxLevelBump);
+}
+
+void XFoam_SnappyHexMesh::tuneForFeatures(
+	const XFoam_BlockMesh&                       bg,
+	const std::vector<const XFoam_BrepBase*>&    surfs) const
+{
+	if (!phases_.fitFeatures || tunedForFeatures_) return;
+	tunedForFeatures_ = true;
+	if (surfaces_.empty() || surfs.empty()) return;
+
+	// ---- 1. 推断 base cell 最小边长 + 估算 base cell 总数 ----
+	XFoam_Scalar baseMin = std::numeric_limits<XFoam_Scalar>::infinity();
+	XFoam_Label  baseCellCount = 0;
+	for (XFoam_Label bi = 0; bi < bg.size(); ++bi)
+	{
+		const XFoam_BlockDescriptor& bd = bg[bi];
+		const XFoam_CellShape& shp = bd.blockShape();
+		const XFoam_UList<XFoam_Vector3D>& bv = bd.vertices();
+		XFoam_Vector3D mn = bv[shp[0]] * bg.scaleFactor();
+		XFoam_Vector3D mx = mn;
+		for (int i = 1; i < 8; ++i)
+		{
+			const XFoam_Vector3D p = bv[shp[i]] * bg.scaleFactor();
+			mn.x() = std::min(mn.x(), p.x()); mn.y() = std::min(mn.y(), p.y()); mn.z() = std::min(mn.z(), p.z());
+			mx.x() = std::max(mx.x(), p.x()); mx.y() = std::max(mx.y(), p.y()); mx.z() = std::max(mx.z(), p.z());
+		}
+		const int Nx = std::max(1, static_cast<int>(bd.density().x()));
+		const int Ny = std::max(1, static_cast<int>(bd.density().y()));
+		const int Nz = std::max(1, static_cast<int>(bd.density().z()));
+		baseMin = std::min<XFoam_Scalar>(baseMin, (mx.x() - mn.x()) / Nx);
+		baseMin = std::min<XFoam_Scalar>(baseMin, (mx.y() - mn.y()) / Ny);
+		baseMin = std::min<XFoam_Scalar>(baseMin, (mx.z() - mn.z()) / Nz);
+		baseCellCount += static_cast<XFoam_Label>(Nx) * Ny * Nz;
+	}
+	if (!std::isfinite(baseMin) || baseMin <= 0)
+	{
+		std::cout << "fitFeatures: cannot infer base cell size; skipping." << std::endl;
+		return;
+	}
+
+	// ---- 2. 对每个 surface 反推所需 maxLevel ----
+	// 目标：每 base cell 的细分单元尺寸 ≤ safetyFactor × minFeatureLength，确保
+	// 相邻 feature 不会落进同一个 cell 而被网格合并。safetyFactor=0.5 → cell ≤
+	// 半 feature 长度。封顶取 min(fitFeaturesMaxLevelBump, maxLocalCells 预算
+	// 允许的额外 level)。预算估算：表面 cell 数 ≈ baseCellCount × 4^extraLevel ×
+	// surfFrac（保守取 0.3），加上原层级 cells。
+	const XFoam_Scalar safetyFactor = static_cast<XFoam_Scalar>(0.5);
+	const XFoam_Label hardBumpCap = std::max<XFoam_Label>(0, phases_.fitFeaturesMaxLevelBump);
+	const XFoam_Label budget = std::max<XFoam_Label>(1, refine_.maxLocalCells);
+	for (size_t si = 0; si < surfaces_.size(); ++si)
+	{
+		if (si >= surfs.size() || !surfs[si] || surfs[si]->empty()) continue;
+		const std::string surfName = static_cast<const std::string&>(
+			static_cast<const XFoam_String&>(surfaces_[si].name));
+		const XFoam_Scalar minFeat = surfs[si]->minFeatureLength();
+		if (minFeat <= 0)
+		{
+			std::cout << "fitFeatures: surf '" << surfName
+				<< "' has no feature info (buildFeatures not called?); maxLevel left at "
+				<< surfaces_[si].maxLevel << "." << std::endl;
+			continue;
+		}
+		const XFoam_Scalar target = minFeat * safetyFactor;
+		if (baseMin <= target)
+		{
+			std::cout << "fitFeatures: surf '" << surfName << "' base cell ("
+				<< baseMin << ") already ≤ target (" << target
+				<< "); maxLevel left at " << surfaces_[si].maxLevel << "." << std::endl;
+			continue;
+		}
+		const double ratio = static_cast<double>(baseMin) / static_cast<double>(target);
+		const XFoam_Label needed = static_cast<XFoam_Label>(
+			std::ceil(std::log(ratio) / std::log(2.0)));
+
+		// 预算反推：满足 baseCellCount × 4^extra × 0.3 ≤ budget
+		// → extra ≤ log4(budget / (0.3 × baseCellCount))
+		double budgetExtra = std::log(
+			static_cast<double>(budget) /
+			std::max<double>(1.0, 0.3 * static_cast<double>(baseCellCount))) / std::log(4.0);
+		XFoam_Label budgetCap = (budgetExtra > 0)
+			? static_cast<XFoam_Label>(std::floor(budgetExtra)) : 0;
+		const XFoam_Label bump = std::min(hardBumpCap, budgetCap);
+		const XFoam_Label maxAllowed = surfaces_[si].maxLevel + bump;
+		const XFoam_Label tuned = std::min(std::max(surfaces_[si].maxLevel, needed), maxAllowed);
+		std::cout << "fitFeatures: surf '" << surfName
+			<< "' minFeature=" << minFeat << "  base=" << baseMin
+			<< "  needed=+" << (needed - surfaces_[si].maxLevel)
+			<< "  bumpCap=+" << bump
+			<< " (hardCap=+" << hardBumpCap << ", budgetCap=+" << budgetCap << ")"
+			<< std::endl;
+		if (tuned > surfaces_[si].maxLevel)
+		{
+			std::cout << "  maxLevel " << surfaces_[si].maxLevel << " -> " << tuned
+				<< "  (target cell=" << (baseMin / (1LL << tuned)) << ")";
+			if (tuned < needed)
+			{
+				std::cout << "  [capped; raise fitFeaturesMaxLevelBump and/or maxLocalCells"
+					<< " to lift cap to +" << (needed - surfaces_[si].maxLevel) << "]";
+			}
+			std::cout << std::endl;
+			surfaces_[si].maxLevel = tuned;
+		}
+		else
+		{
+			std::cout << "  maxLevel left at " << surfaces_[si].maxLevel
+				<< " (already adequate or capped to 0 extra)." << std::endl;
+		}
+	}
+
+	// ---- 3. 强制 feature snap on，并放宽相关旋钮 ----
+	if (!snap_.implicitFeatureSnap)
+	{
+		std::cout << "fitFeatures: implicitFeatureSnap false -> true" << std::endl;
+		snap_.implicitFeatureSnap = true;
+	}
+	if (snap_.nFeatureSnapIter < 10)
+	{
+		std::cout << "fitFeatures: nFeatureSnapIter " << snap_.nFeatureSnapIter
+		          << " -> 10" << std::endl;
+		snap_.nFeatureSnapIter = 10;
+	}
+	if (snap_.tolerance < static_cast<XFoam_Scalar>(4))
+	{
+		std::cout << "fitFeatures: tolerance " << snap_.tolerance << " -> 4" << std::endl;
+		snap_.tolerance = static_cast<XFoam_Scalar>(4);
+	}
+	if (refine_.resolveFeatureAngle > static_cast<XFoam_Scalar>(20))
+	{
+		std::cout << "fitFeatures: resolveFeatureAngle "
+		          << refine_.resolveFeatureAngle << " -> 20" << std::endl;
+		refine_.resolveFeatureAngle = static_cast<XFoam_Scalar>(20);
+	}
 }
 
 void XFoam_SnappyHexMesh::readRefinementSurfaces(const XFoam_Dictionary& dict)
@@ -511,6 +646,10 @@ bool XFoam_SnappyHexMesh::run(
 	const XFoam_FileName&                        outPolyMeshDir,
 	Stats&                                       stats) const
 {
+	// fitFeatures：在 stats / refinementLevel 计算之前先调一次自动调参，让
+	// stats.refinementLevel 反映调优后的 maxLevel。调过一次后内部 flag 防重入。
+	tuneForFeatures(bg, stls);
+
 	const XFoam_Label nSurf = static_cast<XFoam_Label>(stls.size());
 	const XFoam_Label nSpec = static_cast<XFoam_Label>(surfaces_.size());
 

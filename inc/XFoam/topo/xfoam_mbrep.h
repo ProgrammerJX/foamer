@@ -152,6 +152,10 @@ public:
 	XFoam_String subPatchName(XFoam_Label id) const override;
 	XFoam_Label closestSubPatchId(const XFoam_Vector3D& p) const override;
 
+	/// 最短 feature TopoDS_Edge 长度（sampled 多段线累计弦长）。buildFeatures
+	/// 未调用过时返回 0。
+	XFoam_Scalar minFeatureLength() const override;
+
 	// pImpl：仅在 XFOAM_WITH_OCCT=ON 时有内容。前向声明 + AutoPtr 让头文件
 	// 不必拉入 OCCT。OFF 时仍可以构造（指向空的 OcctData）。
 	// 暴露为 public 仅为同 .cpp 内的 free helper（rebuildFromShape）访问；外

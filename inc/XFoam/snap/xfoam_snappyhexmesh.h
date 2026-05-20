@@ -47,6 +47,19 @@ public:
 		/// polyMesh patch。默认 false（保留旧 1 patch/surface 行为）。
 		/// snappyHexMeshDict 顶层 `perFacePatches true;` 打开。
 		bool perFacePatches = false;
+
+		/// 自动调整 mesh 参数到能保留所有 feature。打开后 run() 会按
+		/// brep->minFeatureLength() 反推所需 maxLevel 并就地修改 surface
+		/// maxLevel / snap implicitFeatureSnap / nFeatureSnapIter / tolerance /
+		/// resolveFeatureAngle。为避免 cell 爆炸，maxLevel 提升幅度同时受
+		/// fitFeaturesMaxLevelBump 与 maxLocalCells 双重封顶。snappyHexMeshDict
+		/// 顶层 `fitFeatures true;` 打开。
+		bool fitFeatures = false;
+		/// fitFeatures 时 maxLevel 相对原值的最大提升幅度。默认 +1 是个安全
+		/// 起点；user 在 dict 里 `fitFeaturesMaxLevelBump 2` (或更高) 可以让
+		/// 加密追到更小 feature，但 MBrep + OCCT analytic 查询路径下 +2 可能
+		/// 让 castellated 阶段慢 1-2 个数量级（base × 4^extraLevel × nFaces）。
+		XFoam_Label fitFeaturesMaxLevelBump = 1;
 	};
 
 	/// 一个 refinementSurfaces.<name> 入口；resolveStl() 阶段调用方按 surface name
@@ -161,16 +174,29 @@ public:
 		Stats&                 stats) const;
 
 private:
-	XFoam_RefinementParameters refine_;
-	XFoam_SnapParameters snap_;
+	// snap_ / refine_ / surfaces_ 在 tuneForFeatures() 里就地修改（fitFeatures
+	// 开关下根据 brep 的 minFeatureLength 反推后调高 maxLevel 等）。tune 在
+	// const run() 路径里调用，故声明 mutable。
+	mutable XFoam_RefinementParameters refine_;
+	mutable XFoam_SnapParameters snap_;
 	XFoam_LayerParameters layer_;
 	PhaseFlags phases_;
 
-	std::vector<SurfaceSpec> surfaces_;
+	mutable std::vector<SurfaceSpec> surfaces_;
+	mutable bool tunedForFeatures_ = false; ///< tuneForFeatures 已跑过
 
 	void readPhaseFlags(const XFoam_Dictionary& snappyDict);
 	void readRefinementSurfaces(const XFoam_Dictionary& snappyDict);
 	void readGeometry(const XFoam_Dictionary& snappyDict);
+
+	/// 当 phases_.fitFeatures=true 时，在 run() 开头按 brep 反报的最小 feature
+	/// 尺度自动调高 surface maxLevel / 强制 implicitFeatureSnap / 拉宽 snap
+	/// tolerance / 拉低 resolveFeatureAngle。base_cell_min_extent 从 bg 推。
+	/// 一次性修改，重复调 run() 不会反复调（已调过的不再触发；可由 dict 重读
+	/// 或 setter 复位）。
+	void tuneForFeatures(
+		const XFoam_BlockMesh&                       bg,
+		const std::vector<const XFoam_BrepBase*>&    surfs) const;
 };
 
 #endif

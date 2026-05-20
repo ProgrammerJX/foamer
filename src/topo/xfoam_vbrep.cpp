@@ -1282,6 +1282,19 @@ XFoam_String XFoam_VBrep::subPatchName(XFoam_Label id) const
 	return patchNames_[id];
 }
 
+XFoam_Scalar XFoam_VBrep::minFeatureLength() const
+{
+	ensureAcceleration();
+	if (featureEdges_.empty()) return 0;
+	XFoam_Scalar best = std::numeric_limits<XFoam_Scalar>::infinity();
+	for (const auto& fe : featureEdges_)
+	{
+		const XFoam_Scalar L = (fe.p2 - fe.p1).mag();
+		if (L > 0 && L < best) best = L;
+	}
+	return std::isfinite(best) ? best : 0;
+}
+
 XFoam_Label XFoam_VBrep::closestSubPatchId(const XFoam_Vector3D& p) const
 {
 	ensureAcceleration();

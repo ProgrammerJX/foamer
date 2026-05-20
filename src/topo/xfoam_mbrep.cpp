@@ -737,6 +737,25 @@ void XFoam_MBrep::ensureBboxCache() const
 	bboxCacheBuilt_ = true;
 }
 
+XFoam_Scalar XFoam_MBrep::minFeatureLength() const
+{
+	if (featureEdgeIdx_.empty()) return 0;
+	XFoam_Scalar best = std::numeric_limits<XFoam_Scalar>::infinity();
+	for (XFoam_Label idx : featureEdgeIdx_)
+	{
+		if (idx < 0 || idx >= edges_.size()) continue;
+		const auto& e = edges_[idx];
+		if (e.sampled.size() < 2) continue;
+		XFoam_Scalar L = 0;
+		for (size_t i = 1; i < e.sampled.size(); ++i)
+		{
+			L += (e.sampled[i] - e.sampled[i - 1]).mag();
+		}
+		if (L > 0 && L < best) best = L;
+	}
+	return std::isfinite(best) ? best : 0;
+}
+
 XFoam_String XFoam_MBrep::subPatchName(XFoam_Label id) const
 {
 	if (id < 0 || id >= faces_.size()) return XFoam_String();

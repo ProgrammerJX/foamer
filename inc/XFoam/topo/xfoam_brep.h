@@ -165,6 +165,15 @@ public:
 	virtual XFoam_Label nSubPatches() const { return 0; }
 	virtual XFoam_String subPatchName(XFoam_Label /*id*/) const { return XFoam_String(); }
 	virtual XFoam_Label closestSubPatchId(const XFoam_Vector3D& /*p*/) const { return -1; }
+
+	/// 最小 feature 尺度（mm 等线性单位）。返回的语义：
+	///   * VBrep：featureEdges_ 中最短的一段（一条 DiscreteEdge）长度。
+	///   * MBrep：featureEdgeIdx_ 对应 ParametricEdge 的 sampled 多段线总长
+	///            最短者（≈ 最短 TopoDS_Edge 的弦长）。
+	/// 用于 snappy 的 fitFeatures 自动调参：cell size 应 ≤ k × minFeatureLength
+	/// 才能让相邻 feature 不在网格上合并。无 feature 或 buildFeatures 未调用
+	/// 时返回 0。
+	virtual XFoam_Scalar minFeatureLength() const { return 0; }
 };
 
 // 拓扑实体基类。持有：

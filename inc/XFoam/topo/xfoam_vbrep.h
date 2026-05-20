@@ -144,6 +144,10 @@ public:
 	XFoam_String subPatchName(XFoam_Label id) const override;
 	XFoam_Label closestSubPatchId(const XFoam_Vector3D& p) const override;
 
+	/// 最短 feature edge 段（DiscreteEdge）长度。先 ensureAcceleration() 确保
+	/// featureEdges_ 被填好；buildFeatures 未调用过时返回 0。
+	XFoam_Scalar minFeatureLength() const override;
+
 	/// 把 BVH / feature 缓存标记为"过期"。外部直接改 positions_ / faces_ 后必须调。
 	/// 下次 closestPoint 等会按需重建。
 	void invalidateAcceleration() const { accelBuilt_ = false; }
