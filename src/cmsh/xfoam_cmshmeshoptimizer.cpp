@@ -66,6 +66,47 @@ void XFoam_CMshMeshOptimizer::buildBoundaryAdjacency()
 	{
 		nbrs_[i].assign(tmp[i].begin(), tmp[i].end());
 	}
+
+	// 5) 顺便建 incidentFaces_：boundary point → 该点所在 boundary face 列表
+	incidentFaces_.assign(bndPoints_.size(), {});
+	for (int fi = nInt; fi < nAll; ++fi)
+	{
+		for (int v : pm_.faces[static_cast<std::size_t>(fi)].verts)
+		{
+			const auto it = g2l.find(v);
+			if (it == g2l.end()) continue;
+			incidentFaces_[static_cast<std::size_t>(it->second)].push_back(fi);
+		}
+	}
+}
+
+void XFoam_CMshMeshOptimizer::faceNormalAndArea(
+	int faceIdx,
+	XFoam_Vector3D& outNormal,
+	XFoam_Scalar&   outArea) const
+{
+	// Newell's formula：多边形法向 = Σ (v_i × v_{i+1})，面积 = 0.5 * |normal|
+	const auto& verts = pm_.faces[static_cast<std::size_t>(faceIdx)].verts;
+	outNormal = XFoam_Vector3D(0, 0, 0);
+	outArea   = 0;
+	const std::size_t n = verts.size();
+	if (n < 3) return;
+	XFoam_Vector3D N(0, 0, 0);
+	for (std::size_t i = 0; i < n; ++i)
+	{
+		const auto& a = pm_.points[static_cast<std::size_t>(verts[i])];
+		const auto& b = pm_.points[static_cast<std::size_t>(verts[(i + 1) % n])];
+		N += XFoam_Vector3D(
+			(a.y() - b.y()) * (a.z() + b.z()),
+			(a.z() - b.z()) * (a.x() + b.x()),
+			(a.x() - b.x()) * (a.y() + b.y()));
+	}
+	const XFoam_Scalar mag = N.mag();
+	outArea = static_cast<XFoam_Scalar>(0.5) * mag;
+	if (mag > 0)
+	{
+		outNormal = N * (XFoam_Scalar(1) / mag);
+	}
 }
 
 void XFoam_CMshMeshOptimizer::reprojectOne(int vid)
@@ -99,6 +140,24 @@ XFoam_CMshMeshOptimizer::Stats XFoam_CMshMeshOptimizer::optimize()
 		for (std::size_t i = 0; i < bndPoints_.size(); ++i)
 		{
 			snap[i] = pm_.points[static_cast<std::size_t>(bndPoints_[i])];
+		}
+
+		// 若开 quality check，先记下所有受影响 boundary face 的 (normal, area)
+		std::unordered_map<int, std::pair<XFoam_Vector3D, XFoam_Scalar>> oldFaceQ;
+		if (p_.qualityCheck)
+		{
+			std::unordered_set<int> seenF;
+			for (const auto& vf : incidentFaces_)
+			{
+				for (int fi : vf) seenF.insert(fi);
+			}
+			oldFaceQ.reserve(seenF.size() * 2);
+			for (int fi : seenF)
+			{
+				XFoam_Vector3D n; XFoam_Scalar a;
+				faceNormalAndArea(fi, n, a);
+				oldFaceQ.emplace(fi, std::make_pair(n, a));
+			}
 		}
 
 		stats = Stats{};
@@ -139,6 +198,34 @@ XFoam_CMshMeshOptimizer::Stats XFoam_CMshMeshOptimizer::optimize()
 			}
 		}
 
+		// 3b) quality check + rollback
+		if (p_.qualityCheck)
+		{
+			for (std::size_t i = 0; i < bndPoints_.size(); ++i)
+			{
+				bool bad = false;
+				for (int fi : incidentFaces_[i])
+				{
+					const auto it = oldFaceQ.find(fi);
+					if (it == oldFaceQ.end()) continue;
+					XFoam_Vector3D nNew; XFoam_Scalar aNew;
+					faceNormalAndArea(fi, nNew, aNew);
+					const auto& nOld = it->second.first;
+					const XFoam_Scalar aOld = it->second.second;
+					// face 退化（aNew == 0）算坏
+					if (aNew <= 0) { bad = true; break; }
+					const XFoam_Scalar dot = nOld.x() * nNew.x() + nOld.y() * nNew.y() + nOld.z() * nNew.z();
+					if (dot < p_.minFaceNormalDot) { bad = true; break; }
+					if (aOld > 0 && aNew < p_.minFaceAreaRatio * aOld) { bad = true; break; }
+				}
+				if (bad)
+				{
+					pm_.points[static_cast<std::size_t>(bndPoints_[i])] = snap[i];
+					++stats.nRollback;
+				}
+			}
+		}
+
 		// 4) 统计
 		for (std::size_t i = 0; i < bndPoints_.size(); ++i)
 		{
@@ -159,7 +246,9 @@ XFoam_CMshMeshOptimizer::Stats XFoam_CMshMeshOptimizer::optimize()
 		{
 			std::cout << "  optimizer iter " << iter << ": moved=" << stats.nMoved
 			          << "  avg=" << stats.avgMove
-			          << "  max=" << stats.maxMove << std::endl;
+			          << "  max=" << stats.maxMove;
+			if (p_.qualityCheck) std::cout << "  rollback=" << stats.nRollback;
+			std::cout << std::endl;
 		}
 	}
 	return stats;

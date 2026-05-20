@@ -50,6 +50,9 @@ struct Args
 	bool         optimize       = false;
 	int          optIter        = 3;
 	double       optRelax       = 0.5;
+	bool         optQuality     = false;
+	double       optMinDot      = 0.5;
+	double       optMinAreaR    = 0.1;
 	bool         fitFeatures    = false;
 	double       fitFeatSafety  = 0.5;
 	int          fitFeatBump    = 2;
@@ -103,6 +106,9 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-optimize")  == 0) { a.optimize = true; }
 		else if (std::strcmp(arg, "-optIter")   == 0) { if (!nexti(a.optIter))  return false; }
 		else if (std::strcmp(arg, "-optRelax")  == 0) { if (!next(a.optRelax))  return false; }
+		else if (std::strcmp(arg, "-optQuality") == 0) { a.optQuality = true; }
+		else if (std::strcmp(arg, "-optMinDot")  == 0) { if (!next(a.optMinDot))   return false; }
+		else if (std::strcmp(arg, "-optMinAreaR") == 0){ if (!next(a.optMinAreaR)) return false; }
 		else if (std::strcmp(arg, "-fitFeatures") == 0) { a.fitFeatures = true; }
 		else if (std::strcmp(arg, "-fitFeatSafety") == 0) { if (!next(a.fitFeatSafety)) return false; }
 		else if (std::strcmp(arg, "-fitFeatBump")   == 0) { if (!nexti(a.fitFeatBump))  return false; }
@@ -346,6 +352,9 @@ int main(int argc, char** argv)
 					op.snapFeatures = A.snapFeatures;
 					op.cellSizeHint = A.maxCellSize / static_cast<double>(1 << A.surfLevel);
 					op.verbose      = true;
+					op.qualityCheck     = A.optQuality;
+					op.minFaceNormalDot = static_cast<XFoam_Scalar>(A.optMinDot);
+					op.minFaceAreaRatio = static_cast<XFoam_Scalar>(A.optMinAreaR);
 					XFoam_CMshMeshOptimizer optr(pm, brep, op);
 					std::cout << "optimizing (boundary Laplacian + reproject, iter=" << op.nIterations
 					          << " relax=" << op.relaxFactor << ")...\n";
@@ -355,7 +364,8 @@ int main(int argc, char** argv)
 					const double mse4 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t9 - t8).count();
 					std::cout << "optimizer done in " << mse4 << " ms (lastIter moved=" << ost.nMoved
 					          << ", avg=" << ost.avgMove
-					          << ", max=" << ost.maxMove << ")\n";
+					          << ", max=" << ost.maxMove
+					          << ", rollback=" << ost.nRollback << ")\n";
 				}
 			}
 
