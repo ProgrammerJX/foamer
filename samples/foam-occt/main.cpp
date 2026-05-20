@@ -36,6 +36,7 @@
 #include "XFoam/block/xfoam_blockmesh.h"
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
 #include "XFoam/topo/xfoam_topo.h"
+#include "XFoam/utilities/xfoam_boundbox.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_dictionary.h"
 #include "XFoam/utilities/xfoam_error.h"
@@ -278,6 +279,17 @@ int main(int argc, char** argv)
 		          << m.mbrep().nEdges() << " edge / "
 		          << m.mbrep().nFaces() << " face / "
 		          << m.mbrep().nBodies() << " solid\n";
+		{
+			const XFoam_BoundBox bb = m.mbrep().bounds();
+			std::cout << "CAD bounds: ["
+			          << bb.min().x() << "," << bb.max().x() << "] x ["
+			          << bb.min().y() << "," << bb.max().y() << "] x ["
+			          << bb.min().z() << "," << bb.max().z() << "]\n"
+			          << "extent    : "
+			          << (bb.max().x() - bb.min().x()) << " x "
+			          << (bb.max().y() - bb.min().y()) << " x "
+			          << (bb.max().z() - bb.min().z()) << "\n";
+		}
 
 		// 档 3：snappy 直接走 MBrep（或可选先转 VBrep）
 		if (!A.snappyOutDir.empty())

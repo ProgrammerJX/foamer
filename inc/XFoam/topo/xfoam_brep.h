@@ -147,6 +147,24 @@ public:
 		closestPointAndNormal(p, q, n);
 		return (p - q).mag();
 	}
+
+	// =========================================================================
+	// 子-patch（一面一 patch）支持。snappy 可在 perFacePatches=true 时把
+	// boundary face 按归属的 sub-patch 分桶 emit 多个 polyMesh patch。
+	//
+	// 语义对齐：
+	//   * VBrep：sub-patch = DiscreteFace::patchId（STL solid / BDF HMMOVE
+	//     component），nSubPatches() = patchNames_.size()。
+	//   * MBrep：sub-patch = TopoDS_Face id（1 patch per parametric face），
+	//     nSubPatches() = nFaces()。
+	//
+	// closestSubPatchId(p) 返回 0..nSubPatches()-1 之间的 id，或 -1 表示"未
+	// 知 / 该 brep 没有 sub-patch 概念"。snappy 见 -1 时回退到原 (surf-id) 单
+	// patch 行为。空 brep 返回 -1。
+	// =========================================================================
+	virtual XFoam_Label nSubPatches() const { return 0; }
+	virtual XFoam_String subPatchName(XFoam_Label /*id*/) const { return XFoam_String(); }
+	virtual XFoam_Label closestSubPatchId(const XFoam_Vector3D& /*p*/) const { return -1; }
 };
 
 // 拓扑实体基类。持有：

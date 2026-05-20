@@ -737,6 +737,28 @@ void XFoam_MBrep::ensureBboxCache() const
 	bboxCacheBuilt_ = true;
 }
 
+XFoam_String XFoam_MBrep::subPatchName(XFoam_Label id) const
+{
+	if (id < 0 || id >= faces_.size()) return XFoam_String();
+	if (id < faceNames_.size() && !faceNames_[id].empty())
+	{
+		return faceNames_[id];
+	}
+	std::ostringstream os;
+	os << "face_" << id;
+	return XFoam_String(os.str());
+}
+
+XFoam_Label XFoam_MBrep::closestSubPatchId(const XFoam_Vector3D& p) const
+{
+	if (faces_.size() == 0) return -1;
+	ensureQueryProxy();
+	if (!queryProxy_.valid() || queryProxy_().empty()) return -1;
+	// proxy 是 toVBrep() 烘焙的，每个 tri 的 patchId == 它来源的
+	// ParametricFace id —— 见 toVBrep() 实现。
+	return queryProxy_().closestSubPatchId(p);
+}
+
 bool XFoam_MBrep::contains(const XFoam_Vector3D& p) const
 {
 	// 委托给内置 VBrep 代理（BVH ray-cast 计数法）。

@@ -143,6 +143,15 @@ public:
 	/// feature edge；feature vertex 则是入射 3 条以上 feature edge 的 TopoDS_Vertex。
 	void buildFeatures(XFoam_Scalar featureAngleDeg) override;
 
+	// ---- sub-patch（一面一 patch）API ----
+	// MBrep 的 sub-patch = TopoDS_Face id（一 face 一 patch），name 走 faceNames_
+	// （未命名 → "face_<id>"）。closestSubPatchId 走 query proxy 的 closestSubPatchId
+	// —— proxy 是用 toVBrep() 做的，每张 ParametricFace 的 tri 都带 patchId =
+	// 该 face id，所以代理 BVH 找最近 tri 自然给出 face id。
+	XFoam_Label nSubPatches() const override { return faces_.size(); }
+	XFoam_String subPatchName(XFoam_Label id) const override;
+	XFoam_Label closestSubPatchId(const XFoam_Vector3D& p) const override;
+
 	// pImpl：仅在 XFOAM_WITH_OCCT=ON 时有内容。前向声明 + AutoPtr 让头文件
 	// 不必拉入 OCCT。OFF 时仍可以构造（指向空的 OcctData）。
 	// 暴露为 public 仅为同 .cpp 内的 free helper（rebuildFromShape）访问；外

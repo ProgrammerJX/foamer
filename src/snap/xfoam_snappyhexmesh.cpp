@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <map>
 #include <unordered_map>
 #include <vector>
 
@@ -262,6 +263,7 @@ void XFoam_SnappyHexMesh::readPhaseFlags(const XFoam_Dictionary& dict)
 	(void)dict.readIfPresent(XFoam_Word("castellatedMesh"), phases_.castellatedMesh);
 	(void)dict.readIfPresent(XFoam_Word("snap"), phases_.snap);
 	(void)dict.readIfPresent(XFoam_Word("addLayers"), phases_.addLayers);
+	(void)dict.readIfPresent(XFoam_Word("perFacePatches"), phases_.perFacePatches);
 }
 
 void XFoam_SnappyHexMesh::readRefinementSurfaces(const XFoam_Dictionary& dict)
@@ -1021,16 +1023,26 @@ bool XFoam_SnappyHexMesh::run(
 	//   - fromGridBoundary == true → 背景 walls 顶面 → 原 BlockMesh.patchNames()[0]
 	//   - 否则 (dedup 只见 1 次但邻居 base-cell 存在，意味着邻居 sub-cell 被 STL 切掉)
 	//     → 归属到该 face centroid 最近的 STL 对应的 patch（多 surface 时）。
+	//
+	// 当 phases_.perFacePatches=true 时，进一步按 brep 的 sub-patch 分桶：
+	//   * VBrep sub-patch = DiscreteFace.patchId（STL solid / BDF component）
+	//   * MBrep sub-patch = TopoDS_Face id（一面一 patch）
+	// 这条路径仍走 closestPointAndNormal 找 bestSi，再 closestSubPatchId 拿 pid，
+	// 然后桶按 (si,pid) 一起切；为零时（brep 没提供 sub-patch）回退到 si 单桶。
 	std::vector<int> internalIdx; internalIdx.reserve(finalFaces.size());
 	std::vector<int> wallsIdx;
 	// stlIdxBySurf[si] 收集第 si 个 surface 上的 boundary face 序号
 	std::vector<std::vector<int>> stlIdxBySurf(static_cast<size_t>(nSurf));
+	// perFacePatches 模式专用：(si, pid) → face 序号集合。pid == -1 表示
+	// 该 brep 没给 sub-patch（fallback 用），等同进 stlIdxBySurf[si] 单桶。
+	std::map<std::pair<XFoam_Label, XFoam_Label>, std::vector<int>> stlIdxByPair;
 	auto faceCentroid = [&](const FInfo& f) -> XFoam_Vector3D {
 		XFoam_Vector3D c(0, 0, 0);
 		for (int v : f.verts) c = c + pts[v];
 		const XFoam_Scalar inv = static_cast<XFoam_Scalar>(1) / static_cast<XFoam_Scalar>(f.verts.size());
 		return c * inv;
 	};
+	const bool perFace = phases_.perFacePatches;
 	for (int fi = 0; fi < static_cast<int>(finalFaces.size()); ++fi)
 	{
 		const FInfo& f = finalFaces[fi];
@@ -1050,7 +1062,14 @@ bool XFoam_SnappyHexMesh::run(
 			if (d2 < bestD2) { bestD2 = d2; bestSi = si; }
 		}
 		if (bestSi < 0) bestSi = 0; // 全空时落第 0 个 (前置已校验非全空)
+		// stlIdxBySurf 始终填 —— 后续 snap / addLayers / motionSmoother
+		// 都按 si 取 boundary face 列表；perFace 只影响 emission 分桶。
 		stlIdxBySurf[static_cast<size_t>(bestSi)].push_back(fi);
+		if (perFace)
+		{
+			const XFoam_Label pid = stls[bestSi]->closestSubPatchId(fc);
+			stlIdxByPair[std::make_pair(bestSi, pid)].push_back(fi);
+		}
 	}
 
 	// internal faces 按 (owner, neighbour) 升序排
@@ -1064,6 +1083,7 @@ bool XFoam_SnappyHexMesh::run(
 	auto byOwner = [&](int a, int b) { return finalFaces[a].owner < finalFaces[b].owner; };
 	std::sort(wallsIdx.begin(), wallsIdx.end(), byOwner);
 	for (auto& v : stlIdxBySurf) std::sort(v.begin(), v.end(), byOwner);
+	for (auto& kv : stlIdxByPair) std::sort(kv.second.begin(), kv.second.end(), byOwner);
 
 	// ----- 8. snap：四步 -----
 	//   8a) STL 投影 snapped 边界点
@@ -1829,11 +1849,38 @@ bool XFoam_SnappyHexMesh::run(
 	const std::string wallType = origTypes.empty() ? std::string("wall")
 		: std::string(static_cast<const std::string&>(static_cast<const XFoam_String&>(origTypes[0])));
 	addPatch(wallsIdx, wallName, wallType);
-	for (XFoam_Label si = 0; si < nSurf; ++si)
+	if (perFace)
 	{
-		const std::string pname = std::string(
-			static_cast<const std::string&>(static_cast<const XFoam_String&>(surfaces_[si].name)));
-		addPatch(stlIdxBySurf[static_cast<size_t>(si)], pname, std::string("wall"));
+		// 一面一 patch：按 (si, pid) 排序后逐桶 emit。patch 名 = surfName + "_"
+		// + brep 给的 subPatchName（MBrep 一律有名，VBrep 仅当 patchNames_ 填
+		// 过时；pid==-1 fallback 时只用 surfName）。
+		for (auto& kv : stlIdxByPair)
+		{
+			const XFoam_Label si  = kv.first.first;
+			const XFoam_Label pid = kv.first.second;
+			const std::string surfNameStr = std::string(
+				static_cast<const std::string&>(static_cast<const XFoam_String&>(surfaces_[si].name)));
+			std::string pname = surfNameStr;
+			if (pid >= 0 && stls[si])
+			{
+				const XFoam_String sub = stls[si]->subPatchName(pid);
+				const std::string subStr = static_cast<const std::string&>(sub);
+				if (!subStr.empty())
+				{
+					pname = surfNameStr + "_" + subStr;
+				}
+			}
+			addPatch(kv.second, pname, std::string("wall"));
+		}
+	}
+	else
+	{
+		for (XFoam_Label si = 0; si < nSurf; ++si)
+		{
+			const std::string pname = std::string(
+				static_cast<const std::string&>(static_cast<const XFoam_String&>(surfaces_[si].name)));
+			addPatch(stlIdxBySurf[static_cast<size_t>(si)], pname, std::string("wall"));
+		}
 	}
 
 	stats.outPatchNames.setSize(static_cast<XFoam_Label>(patchNamesOut.size()));

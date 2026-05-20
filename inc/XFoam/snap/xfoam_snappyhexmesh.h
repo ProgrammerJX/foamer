@@ -42,6 +42,11 @@ public:
 		bool castellatedMesh = true; // 加密
 		bool snap = true;            // 表面 snap
 		bool addLayers = false;      // 未实现，默认关
+		/// 一面一 patch：boundary face 按归属的 brep sub-patch（VBrep
+		/// DiscreteFace.patchId / MBrep TopoDS_Face id）分桶 emit 多个
+		/// polyMesh patch。默认 false（保留旧 1 patch/surface 行为）。
+		/// snappyHexMeshDict 顶层 `perFacePatches true;` 打开。
+		bool perFacePatches = false;
 	};
 
 	/// 一个 refinementSurfaces.<name> 入口；resolveStl() 阶段调用方按 surface name

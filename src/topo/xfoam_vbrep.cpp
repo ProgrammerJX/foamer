@@ -1273,6 +1273,40 @@ void XFoam_VBrep::closestPointAndNormal(
 	outNormal  = triCache_[bestTri].normal;
 }
 
+XFoam_String XFoam_VBrep::subPatchName(XFoam_Label id) const
+{
+	if (id < 0 || id >= static_cast<XFoam_Label>(patchNames_.size()))
+	{
+		return XFoam_String();
+	}
+	return patchNames_[id];
+}
+
+XFoam_Label XFoam_VBrep::closestSubPatchId(const XFoam_Vector3D& p) const
+{
+	ensureAcceleration();
+	if (triCache_.empty()) return -1;
+	XFoam_Scalar bestD2 = std::numeric_limits<XFoam_Scalar>::infinity();
+	XFoam_Vector3D bestQ = triCache_[0].v0;
+	XFoam_Label bestTri  = 0;
+	if (!bvhNodes_.empty())
+	{
+		bvhClosestPoint(p, bestD2, bestQ, bestTri, 0);
+	}
+	else
+	{
+		for (size_t i = 0; i < triCache_.size(); ++i)
+		{
+			XFoam_Scalar d2 = 0;
+			const XFoam_Vector3D q = closestPointOnTriangle(
+				p, triCache_[i].v0, triCache_[i].v1, triCache_[i].v2, d2);
+			if (d2 < bestD2) { bestD2 = d2; bestTri = static_cast<XFoam_Label>(i); bestQ = q; }
+		}
+	}
+	if (bestTri < 0 || bestTri >= faces_.size()) return -1;
+	return faces_[bestTri].patchId;
+}
+
 void XFoam_VBrep::rebuildFeaturesGeomFromEdges(XFoam_Scalar /*featureAngleDeg*/) const
 {
 	featureEdges_.clear();

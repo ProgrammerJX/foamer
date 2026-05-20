@@ -133,6 +133,17 @@ public:
 	/// invalidateAcceleration() —— 之后调任何查询都会重建 BVH。
 	void buildFeatures(XFoam_Scalar featureAngleDeg) override;
 
+	// ---- sub-patch（一面一 patch）API ----
+	// VBrep 把 patchId（DiscreteFace.patchId，源自 STL solid / BDF component
+	// / MBrep face id）当 sub-patch。closestSubPatchId 走 BVH 找最近 tri 后
+	// 返回该 tri 的 patchId。
+	XFoam_Label nSubPatches() const override
+	{
+		return static_cast<XFoam_Label>(patchNames_.size());
+	}
+	XFoam_String subPatchName(XFoam_Label id) const override;
+	XFoam_Label closestSubPatchId(const XFoam_Vector3D& p) const override;
+
 	/// 把 BVH / feature 缓存标记为"过期"。外部直接改 positions_ / faces_ 后必须调。
 	/// 下次 closestPoint 等会按需重建。
 	void invalidateAcceleration() const { accelBuilt_ = false; }
