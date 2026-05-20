@@ -50,6 +50,9 @@ struct Args
 	bool         optimize       = false;
 	int          optIter        = 3;
 	double       optRelax       = 0.5;
+	bool         fitFeatures    = false;
+	double       fitFeatSafety  = 0.5;
+	int          fitFeatBump    = 2;
 
 	/// 命令行多次指定的 object refines
 	struct BoxR    { double xmn, ymn, zmn, xmx, ymx, zmx; int level; };
@@ -98,6 +101,9 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-optimize")  == 0) { a.optimize = true; }
 		else if (std::strcmp(arg, "-optIter")   == 0) { if (!nexti(a.optIter))  return false; }
 		else if (std::strcmp(arg, "-optRelax")  == 0) { if (!next(a.optRelax))  return false; }
+		else if (std::strcmp(arg, "-fitFeatures") == 0) { a.fitFeatures = true; }
+		else if (std::strcmp(arg, "-fitFeatSafety") == 0) { if (!next(a.fitFeatSafety)) return false; }
+		else if (std::strcmp(arg, "-fitFeatBump")   == 0) { if (!nexti(a.fitFeatBump))  return false; }
 		else if (std::strcmp(arg, "-refineBox") == 0)
 		{
 			Args::BoxR b;
@@ -202,6 +208,9 @@ int main(int argc, char** argv)
 		XFoam_CMshOctreeCreator::Params p;
 		p.maxCellSize = static_cast<XFoam_Scalar>(A.maxCellSize);
 		p.maxLevel    = A.surfLevel + 4;
+		p.fitFeatures             = A.fitFeatures;
+		p.fitFeaturesSafety       = static_cast<XFoam_Scalar>(A.fitFeatSafety);
+		p.fitFeaturesMaxLevelBump = A.fitFeatBump;
 		XFoam_CMshOctreeCreator cr(box, p);
 		cr.addSurfaceRefine(brep, A.surfLevel);
 		for (const auto& b : A.refineBoxes)

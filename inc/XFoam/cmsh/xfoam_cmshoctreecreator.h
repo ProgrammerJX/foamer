@@ -63,6 +63,14 @@ public:
 
 		/// inflateRoot 时按 root 对角线比例放大。0.05 = 5%。
 		XFoam_Scalar rootInflate = static_cast<XFoam_Scalar>(0.05);
+
+		/// 打开 fitFeatures：build() 会在 SurfaceRefine 之前根据
+		/// brep.minFeatureLength() 自动提 sr.level（但不超过 sr.level +
+		/// fitFeaturesMaxLevelBump，再 clamp 到 Params.maxLevel）。
+		/// 目标 cellSize = minFeatureLength * fitFeaturesSafety。
+		bool         fitFeatures             = false;
+		XFoam_Scalar fitFeaturesSafety       = static_cast<XFoam_Scalar>(0.5);
+		int          fitFeaturesMaxLevelBump = 2;
 	};
 
 	/// rootBox 通常 = primary brep.bounds()；OctreeCreator 视 inflateRoot 决定

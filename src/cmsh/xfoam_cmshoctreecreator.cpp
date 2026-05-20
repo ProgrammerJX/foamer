@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 
 XFoam_CMshOctreeCreator::XFoam_CMshOctreeCreator(
 	const XFoam_BoundBox& rootBox,
@@ -79,10 +80,40 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 		oct().refineUniform(baseLevel);
 	}
 
+	// 3b) fitFeatures：可选根据 brep.minFeatureLength() 提 surface level
+	std::vector<SurfaceRefine> surfsResolved = surfs_;
+	if (p_.fitFeatures)
+	{
+		for (auto& sr : surfsResolved)
+		{
+			if (!sr.brep || sr.brep->empty()) continue;
+			const XFoam_Scalar minFeat = sr.brep->minFeatureLength();
+			if (minFeat <= 0) continue;
+			const XFoam_Scalar wanted = minFeat * p_.fitFeaturesSafety;
+			if (wanted <= 0 || sMax <= 0) continue;
+			const double ratio = static_cast<double>(sMax) / static_cast<double>(wanted);
+			if (ratio <= 1.0) continue;
+			const int needed = static_cast<int>(std::ceil(std::log(ratio) / std::log(2.0)));
+			const int bumpCap = sr.level + p_.fitFeaturesMaxLevelBump;
+			const int newLv = std::min({needed, bumpCap, p_.maxLevel});
+			if (newLv > sr.level)
+			{
+				std::cout << "  fitFeatures: bump surface level "
+				          << sr.level << " -> " << newLv
+				          << "  (minFeat=" << minFeat
+				          << ", wanted cellSize=" << wanted
+				          << ", needed=" << needed
+				          << ", bumpCap=" << bumpCap
+				          << ", maxLevel=" << p_.maxLevel << ")\n";
+				sr.level = newLv;
+			}
+		}
+	}
+
 	// 4) surface refines（每条 SurfaceRefine 独立刷一遍；level clamp 到 maxLevel）
 	//    注意：refineToSurface 只看 oct.surface_（= primary）；MVP 阶段同一棵
 	//    octree 不支持多 brep 各自加密。要做就给每个 brep 单独建 octree 再合并。
-	for (const auto& sr : surfs_)
+	for (const auto& sr : surfsResolved)
 	{
 		const int lv = std::min(sr.level, p_.maxLevel);
 		if (lv <= baseLevel) continue;
