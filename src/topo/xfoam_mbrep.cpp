@@ -646,23 +646,39 @@ bool XFoam_MBrep::boxIntersects(const XFoam_BoundBox& box) const
 {
 #ifdef XFOAM_WITH_OCCT
 	if (occt_().rootShape.IsNull()) return false;
-	// 粗筛：用 shape bbox vs box overlap。OCCT 没有便宜的"shape 真和 box 相交"
-	// API；想要更紧的要走 IntCurvesFace_ShapeIntersector 或 BRepIntCurveSurface。
-	// snappy 的 boxIntersects 只用作粗筛，这里 bbox-overlap 已足够保守（永不漏，
-	// 可能误报 → snappy 后续精细分支会再过滤）。
-	Bnd_Box bb;
-	BRepBndLib::Add(occt_().rootShape, bb);
-	if (bb.IsVoid()) return false;
-	Standard_Real xMin, yMin, zMin, xMax, yMax, zMax;
-	bb.Get(xMin, yMin, zMin, xMax, yMax, zMax);
-	const XFoam_BoundBox shapeBox(
-		XFoam_Vector3D(static_cast<XFoam_Scalar>(xMin),
-		               static_cast<XFoam_Scalar>(yMin),
-		               static_cast<XFoam_Scalar>(zMin)),
-		XFoam_Vector3D(static_cast<XFoam_Scalar>(xMax),
-		               static_cast<XFoam_Scalar>(yMax),
-		               static_cast<XFoam_Scalar>(zMax)));
-	return box.overlaps(shapeBox);
+	// 粒度选择：用 **per TopoDS_Face bbox** 而不是整 shape bbox。
+	//
+	// 整 shape bbox 的过粗后果：大几何（如 cylinder1.stp 占据 60mm 量级 vs 8mm
+	// base cell）时几乎每个 base cell 都被判相交 → 全部 refine 到 maxLevel，
+	// snappy 的 refine 阶段直接退化成"全网格细化"。
+	//
+	// per-face bbox 仍然保守（永不漏，可能误报；snap 阶段 closestPoint 会再
+	// 精确过滤），但已经能区分 cylinder 表面附近 vs 远端的 cell：每个 TopoDS_Face
+	// 自己的 bbox 比整个 shape 紧得多（圆柱侧面是细长条，圆柱端盖是薄片）。
+	//
+	// 想要再紧可以接 IntCurvesFace_ShapeIntersector（射线 × 面），但代价是
+	// O(N_face) × O(curve solve)，对粗筛阶段太重。
+	for (Standard_Integer fi = 1; fi <= occt_().faceMap.Extent(); ++fi)
+	{
+		Bnd_Box bb;
+		try
+		{
+			BRepBndLib::Add(occt_().faceMap.FindKey(fi), bb);
+		}
+		catch (const Standard_Failure&) { continue; }
+		if (bb.IsVoid()) continue;
+		Standard_Real xMin, yMin, zMin, xMax, yMax, zMax;
+		bb.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+		const XFoam_BoundBox faceBox(
+			XFoam_Vector3D(static_cast<XFoam_Scalar>(xMin),
+			               static_cast<XFoam_Scalar>(yMin),
+			               static_cast<XFoam_Scalar>(zMin)),
+			XFoam_Vector3D(static_cast<XFoam_Scalar>(xMax),
+			               static_cast<XFoam_Scalar>(yMax),
+			               static_cast<XFoam_Scalar>(zMax)));
+		if (box.overlaps(faceBox)) return true;
+	}
+	return false;
 #else
 	(void)box;
 	throw XFoam_Error(
