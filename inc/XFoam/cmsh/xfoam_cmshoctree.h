@@ -1,0 +1,179 @@
+#ifndef XFoam_CMshOctree_H_
+#define XFoam_CMshOctree_H_
+
+// =============================================================================
+// 对标 cfMesh: meshLibrary/utilities/octrees/meshOctree/meshOctree.{H,C}
+//   + meshOctreeCube/meshOctreeCubeCoordinates / meshOctreeCubeBasic
+//
+// 与 cfMesh 原版的差异（MVP 阶段刻意精简）：
+//   * surface 输入：cfMesh 用 const Foam::Module::triSurf&（cfmesh 自家三角面
+//     格式）；myfoam 用 const XFoam_BrepBase&（虚拓扑抽象层）。VBrep / MBrep
+//     都可以直接接入，几何查询全走 BrepBase 虚函数。
+//   * 没有 parallel slot / Hilbert / Morton：MVP 单进程，leaves_ 按建树顺序
+//     收集；后续 phase 再加。
+//   * cube payload：cfMesh 在 cube 内挂 containedTrianglesLabel /
+//     containedEdges 等用于缓存与该 cube 相交的几何元素；这里直接走 brep 的
+//     BVH / OCCT 重算，省内存。代价是每次 boxIntersects/contains 多一次 brep
+//     virtual call；BrepBase 已经分别加了 BVH/proxy 加速，目前测试下来代价
+//     可接受。
+//
+// 数据模型：
+//   * CubeCoords：(posX,posY,posZ, level) 32+32+32+8 bit。child/parent 全靠
+//     位移；与 cfMesh meshOctreeCubeCoordinates 直接对应。
+//   * Cube：CubeCoords + cubeType + children[8] + leafIdx。析构时 cascade
+//     释放 children。
+//   * Octree：root + leaves[] + bbox + brep ref + 一组构建 / 查询 op；
+//     leaves_ 在每次 refine* 之后由 rebuildLeaves() 重新收集。
+// =============================================================================
+
+#include "XFoam/utilities/xfoam_boundbox.h"
+#include "XFoam/utilities/xfoam_common.h"
+#include "XFoam/utilities/xfoam_types.h"
+#include "XFoam/utilities/xfoam_vector.h"
+
+#include <cstdint>
+#include <functional>
+#include <vector>
+
+class XFoam_BrepBase;
+
+/*---------------------------------------------------------------------------*\
+                   Class XFoam_CMshOctreeCubeCoords Declaration
+\*---------------------------------------------------------------------------*/
+
+/// 八叉树 cube 的逻辑坐标。posX/posY/posZ 是当前 level 上整数格坐标
+/// （范围 0 .. 2^level - 1），level=0 时 (0,0,0) 即 root cube。
+class XFoam_API XFoam_CMshOctreeCubeCoords
+{
+public:
+	XFoam_Label  posX  = 0;
+	XFoam_Label  posY  = 0;
+	XFoam_Label  posZ  = 0;
+	std::uint8_t level = 0;
+
+	XFoam_CMshOctreeCubeCoords() = default;
+	XFoam_CMshOctreeCubeCoords(XFoam_Label x, XFoam_Label y, XFoam_Label z, std::uint8_t l)
+		: posX(x), posY(y), posZ(z), level(l)
+	{}
+
+	/// 该 cube 在 root bbox 内对应的 (min,max)。
+	void cubeBox(const XFoam_BoundBox& root,
+	             XFoam_Vector3D&       outMin,
+	             XFoam_Vector3D&       outMax) const;
+
+	/// 该 cube 在 root bbox 内对应的中心点。
+	XFoam_Vector3D centre(const XFoam_BoundBox& root) const;
+
+	/// 该 cube 的边长（root.span / 2^level，三轴各异时取 X 分量）。
+	XFoam_Scalar size(const XFoam_BoundBox& root) const;
+
+	/// 第 childIdx (0..7) 个 child 的坐标。childIdx 位 0/1/2 分别表 x/y/z 半。
+	XFoam_CMshOctreeCubeCoords childCoords(int childIdx) const;
+};
+
+/*---------------------------------------------------------------------------*\
+                       enum XFoam_CMshCubeType
+\*---------------------------------------------------------------------------*/
+
+/// 与 cfMesh meshOctreeCubeBasic::typesOfCubes 对齐。Data = "cube 边界 box
+/// 与 surface 相交"；Inside/Outside = "cube 完全在 surface 内 / 外"；Unknown
+/// = "还未分类"。
+enum class XFoam_CMshCubeType : std::uint8_t
+{
+	Unknown = 1,
+	Outside = 2,
+	Data    = 4,
+	Inside  = 8
+};
+
+/*---------------------------------------------------------------------------*\
+                     Class XFoam_CMshOctreeCube Declaration
+\*---------------------------------------------------------------------------*/
+
+class XFoam_API XFoam_CMshOctreeCube : public XFoam_CMshOctreeCubeCoords
+{
+public:
+	XFoam_CMshCubeType    type     = XFoam_CMshCubeType::Unknown;
+	XFoam_CMshOctreeCube* children[8] = {nullptr, nullptr, nullptr, nullptr,
+	                                     nullptr, nullptr, nullptr, nullptr};
+	XFoam_Label           leafIdx  = -1; ///< 在 Octree.leaves_ 中下标；非 leaf 为 -1
+
+	XFoam_CMshOctreeCube() = default;
+	explicit XFoam_CMshOctreeCube(const XFoam_CMshOctreeCubeCoords& c)
+		: XFoam_CMshOctreeCubeCoords(c)
+	{}
+
+	~XFoam_CMshOctreeCube();
+	XFoam_CMshOctreeCube(const XFoam_CMshOctreeCube&)            = delete;
+	XFoam_CMshOctreeCube& operator=(const XFoam_CMshOctreeCube&) = delete;
+
+	bool isLeaf() const noexcept { return children[0] == nullptr; }
+
+	/// 一次性建好 8 个子 cube；子 cube 的 type=Unknown, children 各自 null。
+	/// 已经有 children 时 no-op。
+	void subdivide();
+};
+
+/*---------------------------------------------------------------------------*\
+                        Class XFoam_CMshOctree Declaration
+\*---------------------------------------------------------------------------*/
+
+class XFoam_API XFoam_CMshOctree
+{
+public:
+	/// rootBox 通常 = brep.bounds() 后略 inflate；OctreeCreator 会代为处理。
+	XFoam_CMshOctree(const XFoam_BrepBase& surface, const XFoam_BoundBox& rootBox);
+	~XFoam_CMshOctree();
+
+	XFoam_CMshOctree(const XFoam_CMshOctree&)            = delete;
+	XFoam_CMshOctree& operator=(const XFoam_CMshOctree&) = delete;
+
+	const XFoam_BoundBox& rootBox() const noexcept { return rootBox_; }
+	const XFoam_BrepBase& surface() const noexcept { return surface_; }
+
+	XFoam_Label nLeaves() const noexcept
+	{
+		return static_cast<XFoam_Label>(leaves_.size());
+	}
+	const XFoam_CMshOctreeCube& leaf(XFoam_Label i) const { return *leaves_[i]; }
+
+	/// 把所有"box 与 surface 相交"的 leaf 一直加密到 targetLevel。已经 ≥
+	/// targetLevel 的不动；与 surface 不相交的也不动（cfMesh
+	/// "adjust octree to surface"）。
+	void refineToSurface(int targetLevel);
+
+	/// 把所有"box 与 region overlaps"的 leaf 加密到 targetLevel。
+	void refineRegion(const XFoam_BoundBox& region, int targetLevel);
+
+	/// 全 leaf 一次性细化到 baseLevel；用作建初始格。
+	void refineUniform(int baseLevel);
+
+	/// 给 leaf 标 Inside/Outside/Data：
+	///   * 与 surface 相交 → Data
+	///   * 否则按 center 走 BrepBase.contains → Inside / Outside
+	/// 调用前 leaf 应至少已经 refineToSurface 过一次。
+	void classifyLeaves();
+
+	/// 报每个 level 上 leaf 数量；out 索引就是 level。
+	void countLeavesByLevel(std::vector<XFoam_Label>& out) const;
+
+	/// 报每种 cube type 的 leaf 数。
+	void countLeavesByType(XFoam_Label& nUnknown,
+	                       XFoam_Label& nOutside,
+	                       XFoam_Label& nData,
+	                       XFoam_Label& nInside) const;
+
+	/// 顺序遍历 leaves（read-only）。
+	void forEachLeaf(const std::function<void(const XFoam_CMshOctreeCube&)>& fn) const;
+
+private:
+	const XFoam_BrepBase&                surface_;
+	XFoam_BoundBox                       rootBox_;
+	XFoam_CMshOctreeCube*                root_ = nullptr;
+	std::vector<XFoam_CMshOctreeCube*>   leaves_;
+
+	void collectLeavesRecursive(XFoam_CMshOctreeCube* c);
+	void rebuildLeaves();
+};
+
+#endif // XFoam_CMshOctree_H_
