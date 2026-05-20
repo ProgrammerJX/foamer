@@ -12,6 +12,7 @@
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
+#include "XFoam/cmsh/xfoam_cmshsurfacemapper.h"
 #include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/topo/xfoam_mbrep.h"
 #include "XFoam/topo/xfoam_topo.h"
@@ -35,6 +36,9 @@ struct Args
 	double       featureAngle = 30;
 	double       deflection   = 1e-2;
 	std::string  polyMeshOut; ///< 若非空，写出 polyMesh 5 件套到此目录
+	bool         mapSurface = false;
+	int          mapIter    = 1;
+	double       mapRelax   = 1.0;
 };
 
 bool parse(int argc, char** argv, Args& a)
@@ -66,6 +70,9 @@ bool parse(int argc, char** argv, Args& a)
 			if (i + 1 >= argc) return false;
 			a.polyMeshOut = argv[++i];
 		}
+		else if (std::strcmp(arg, "-mapSurface") == 0) { a.mapSurface = true; }
+		else if (std::strcmp(arg, "-mapIter")    == 0) { if (!nexti(a.mapIter))  return false; }
+		else if (std::strcmp(arg, "-mapRelax")   == 0) { if (!next(a.mapRelax))  return false; }
 		else
 		{
 			std::cerr << "unknown arg: " << arg << "\n";
@@ -194,6 +201,25 @@ int main(int argc, char** argv)
 			          << " (int " << pm.nInternalFaces()
 			          << " / bnd " << pm.nBoundaryFaces() << ")"
 			          << "  cells=" << pm.nCells << "\n";
+
+			if (A.mapSurface)
+			{
+				XFoam_CMshSurfaceMapper::Params mp;
+				mp.nIterations = A.mapIter;
+				mp.relaxFactor = A.mapRelax;
+				mp.verbose     = true;
+				std::vector<const XFoam_BrepBase*> breps = {&brep};
+				XFoam_CMshSurfaceMapper mapper(pm, breps, mp);
+				std::cout << "mapping boundary points to surface ("
+				          << mapper.boundaryPointIds().size() << " pts, "
+				          << mp.nIterations << " iter, relax=" << mp.relaxFactor << ")...\n";
+				const auto t4 = std::chrono::steady_clock::now();
+				const XFoam_Label moved = mapper.mapToSurface();
+				const auto t5 = std::chrono::steady_clock::now();
+				const double mse2 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t5 - t4).count();
+				std::cout << "mapper done in " << mse2 << " ms, moved " << moved << " pts\n";
+			}
+
 			if (!pm.writeToDir(XFoam_String(A.polyMeshOut)))
 			{
 				std::cerr << "writeToDir failed: " << A.polyMeshOut << "\n";
