@@ -1,5 +1,7 @@
 #include "XFoam/cmsh/xfoam_cmshmeshoptimizer.h"
 
+#include "XFoam/topo/xfoam_brep.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -9,9 +11,9 @@
 
 XFoam_CMshMeshOptimizer::XFoam_CMshMeshOptimizer(
 	XFoam_CMshPolyMeshGen& pm,
-	const std::vector<const XFoam_BrepBase*>& breps,
+	const XFoam_BrepBase& brep,
 	const Params& p)
-	: pm_(pm), breps_(breps), p_(p)
+	: pm_(pm), brep_(brep), p_(p)
 {
 	buildBoundaryAdjacency();
 }
@@ -68,20 +70,13 @@ void XFoam_CMshMeshOptimizer::buildBoundaryAdjacency()
 
 void XFoam_CMshMeshOptimizer::reprojectOne(int vid)
 {
+	if (brep_.empty()) return;
 	const XFoam_Vector3D& p = pm_.points[static_cast<std::size_t>(vid)];
-	XFoam_Vector3D bestQ = p;
-	XFoam_Scalar   bestD = std::numeric_limits<XFoam_Scalar>::infinity();
-	for (const auto* b : breps_)
+	XFoam_Vector3D q, n;
+	brep_.closestPointAndNormal(p, q, n);
+	if (std::isfinite(q.x()) && std::isfinite(q.y()) && std::isfinite(q.z()))
 	{
-		if (!b || b->empty()) continue;
-		XFoam_Vector3D q, n;
-		b->closestPointAndNormal(p, q, n);
-		const XFoam_Scalar d = (p - q).mag();
-		if (d < bestD) { bestD = d; bestQ = q; }
-	}
-	if (std::isfinite(bestD))
-	{
-		pm_.points[static_cast<std::size_t>(vid)] = bestQ;
+		pm_.points[static_cast<std::size_t>(vid)] = q;
 	}
 }
 
@@ -126,33 +121,21 @@ XFoam_CMshMeshOptimizer::Stats XFoam_CMshMeshOptimizer::optimize()
 		}
 
 		// 2) re-project
-		if (p_.reproject && !breps_.empty())
+		if (p_.reproject && !brep_.empty())
 		{
 			for (int vid : bndPoints_) reprojectOne(vid);
 		}
 
 		// 3) 可选 feature snap
-		if (p_.snapFeatures && !breps_.empty())
+		if (p_.snapFeatures && !brep_.empty())
 		{
 			for (int vid : bndPoints_)
 			{
 				const XFoam_Vector3D& p = pm_.points[static_cast<std::size_t>(vid)];
-				XFoam_Vector3D bestQ = p;
-				XFoam_Scalar   bestD = std::numeric_limits<XFoam_Scalar>::infinity();
-				auto bestKind = XFoam_BrepBase::FeatureKind::None;
-				for (const auto* b : breps_)
-				{
-					if (!b || b->empty()) continue;
-					XFoam_Vector3D q, t;
-					const auto k = b->closestFeature(p, R, q, t);
-					if (k == XFoam_BrepBase::FeatureKind::None) continue;
-					const XFoam_Scalar d = (p - q).mag();
-					if (d < bestD) { bestD = d; bestQ = q; bestKind = k; }
-				}
-				if (bestKind != XFoam_BrepBase::FeatureKind::None && std::isfinite(bestD))
-				{
-					pm_.points[static_cast<std::size_t>(vid)] = bestQ;
-				}
+				XFoam_Vector3D q, t;
+				const auto k = brep_.closestFeature(p, R, q, t);
+				if (k == XFoam_BrepBase::FeatureKind::None) continue;
+				pm_.points[static_cast<std::size_t>(vid)] = q;
 			}
 		}
 

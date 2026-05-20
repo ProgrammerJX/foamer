@@ -8,7 +8,6 @@
 //   * 对每个 boundary point，在 searchRadius 内查 BrepBase.closestFeature()
 //   * FeatureKind::Vertex → 是 corner 候选；snapCorners 打开则吸过去
 //   * FeatureKind::Edge   → 是 sharp edge 候选；snapEdges 打开则投到该 edge
-//   * 选择跨 breps 中距离最近的那次 snap
 //
 // 适合在 Mapper 之后单独跑一遍，让 boundary 在尖角 / 棱线处贴合更利索；
 // 也对应 snappy 的 "feature snap" 阶段（隐式特征捕捉）。
@@ -20,11 +19,12 @@
 //   * 没有迭代 + smoothing；一遍过。
 
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
-#include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_types.h"
 
 #include <vector>
+
+class XFoam_BrepBase;
 
 /*---------------------------------------------------------------------------*\
               Class XFoam_CMshSurfaceEdgeExtractor Declaration
@@ -59,7 +59,7 @@ public:
 
 	XFoam_CMshSurfaceEdgeExtractor(
 		XFoam_CMshPolyMeshGen& pm,
-		const std::vector<const XFoam_BrepBase*>& breps,
+		const XFoam_BrepBase& brep,
 		const std::vector<int>& bndPointIds,
 		const Params& p);
 
@@ -67,10 +67,10 @@ public:
 	Stats snap();
 
 private:
-	XFoam_CMshPolyMeshGen&                    pm_;
-	std::vector<const XFoam_BrepBase*>        breps_;
-	std::vector<int>                          bndPoints_;
-	Params                                    p_;
+	XFoam_CMshPolyMeshGen&        pm_;
+	const XFoam_BrepBase&         brep_;
+	std::vector<int>              bndPoints_;
+	Params                        p_;
 };
 
 #endif // XFoam_CMshSurfaceEdgeExtractor_H_

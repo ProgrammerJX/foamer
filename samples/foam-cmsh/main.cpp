@@ -275,14 +275,7 @@ int main(int argc, char** argv)
 			ep.keepData   = true;
 			ep.keepOutside = false;
 			ep.perFacePatches = A.perFacePatches;
-			std::vector<const XFoam_BrepBase*> brepsForExtract;
-			std::vector<std::string>            brepNamesForExtract;
-			if (ep.perFacePatches)
-			{
-				brepsForExtract.push_back(&brep);
-				brepNamesForExtract.push_back("surface");
-			}
-			XFoam_CMshCartesianExtractor ex(oct(), ep, brepsForExtract, brepNamesForExtract);
+			XFoam_CMshCartesianExtractor ex(oct(), ep, &brep);
 			XFoam_CMshPolyMeshGen pm;
 			std::cout << "extracting polyMesh (balance21 + face dedup)..." << std::endl;
 			const auto t2 = std::chrono::steady_clock::now();
@@ -302,12 +295,11 @@ int main(int argc, char** argv)
 
 			if (A.mapSurface || A.snapFeatures)
 			{
-				std::vector<const XFoam_BrepBase*> breps = {&brep};
 				XFoam_CMshSurfaceMapper::Params mp;
 				mp.nIterations = A.mapIter;
 				mp.relaxFactor = A.mapRelax;
 				mp.verbose     = true;
-				XFoam_CMshSurfaceMapper mapper(pm, breps, mp);
+				XFoam_CMshSurfaceMapper mapper(pm, brep, mp);
 				if (A.mapSurface)
 				{
 					std::cout << "mapping boundary points to surface ("
@@ -325,7 +317,7 @@ int main(int argc, char** argv)
 					ep2.searchRadius = A.featureSearchRadius;
 					ep2.cellSizeHint = A.maxCellSize / static_cast<double>(1 << A.surfLevel);
 					ep2.verbose      = true;
-					XFoam_CMshSurfaceEdgeExtractor edx(pm, breps, mapper.boundaryPointIds(), ep2);
+					XFoam_CMshSurfaceEdgeExtractor edx(pm, brep, mapper.boundaryPointIds(), ep2);
 					std::cout << "snapping features (R=" << (ep2.searchRadius > 0 ? ep2.searchRadius : ep2.cellSizeHint * 0.5)
 					          << ", cellHint=" << ep2.cellSizeHint << ")...\n";
 					const auto t6 = std::chrono::steady_clock::now();
@@ -345,7 +337,7 @@ int main(int argc, char** argv)
 					op.snapFeatures = A.snapFeatures;
 					op.cellSizeHint = A.maxCellSize / static_cast<double>(1 << A.surfLevel);
 					op.verbose      = true;
-					XFoam_CMshMeshOptimizer optr(pm, breps, op);
+					XFoam_CMshMeshOptimizer optr(pm, brep, op);
 					std::cout << "optimizing (boundary Laplacian + reproject, iter=" << op.nIterations
 					          << " relax=" << op.relaxFactor << ")...\n";
 					const auto t8 = std::chrono::steady_clock::now();

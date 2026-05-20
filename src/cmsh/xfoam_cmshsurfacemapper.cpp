@@ -1,5 +1,7 @@
 #include "XFoam/cmsh/xfoam_cmshsurfacemapper.h"
 
+#include "XFoam/topo/xfoam_brep.h"
+
 #include <algorithm>
 #include <iostream>
 #include <limits>
@@ -7,9 +9,9 @@
 
 XFoam_CMshSurfaceMapper::XFoam_CMshSurfaceMapper(
 	XFoam_CMshPolyMeshGen& pm,
-	const std::vector<const XFoam_BrepBase*>& breps,
+	const XFoam_BrepBase& brep,
 	const Params& p)
-	: pm_(pm), breps_(breps), p_(p)
+	: pm_(pm), brep_(brep), p_(p)
 {
 	collectBoundaryPoints();
 }
@@ -33,7 +35,7 @@ void XFoam_CMshSurfaceMapper::collectBoundaryPoints()
 
 XFoam_Label XFoam_CMshSurfaceMapper::mapToSurface()
 {
-	if (breps_.empty() || bndPoints_.empty()) return 0;
+	if (brep_.empty() || bndPoints_.empty()) return 0;
 	XFoam_Label totalMoved = 0;
 
 	for (int iter = 0; iter < p_.nIterations; ++iter)
@@ -44,28 +46,15 @@ XFoam_Label XFoam_CMshSurfaceMapper::mapToSurface()
 		for (int vid : bndPoints_)
 		{
 			const XFoam_Vector3D& p = pm_.points[static_cast<std::size_t>(vid)];
+			XFoam_Vector3D q, n;
+			brep_.closestPointAndNormal(p, q, n);
+			const XFoam_Scalar d = (p - q).mag();
+			if (!std::isfinite(d) || d > p_.maxDist) continue;
 
-			// 找最近的 brep
-			XFoam_Vector3D bestQ = p;
-			XFoam_Scalar   bestD = std::numeric_limits<XFoam_Scalar>::infinity();
-			for (const auto* b : breps_)
-			{
-				if (!b || b->empty()) continue;
-				XFoam_Vector3D q, n;
-				b->closestPointAndNormal(p, q, n);
-				const XFoam_Scalar d = (p - q).mag();
-				if (d < bestD)
-				{
-					bestD = d;
-					bestQ = q;
-				}
-			}
-			if (!std::isfinite(bestD) || bestD > p_.maxDist) continue;
-
-			const XFoam_Vector3D newP = p + (bestQ - p) * p_.relaxFactor;
+			const XFoam_Vector3D newP = p + (q - p) * p_.relaxFactor;
 			pm_.points[static_cast<std::size_t>(vid)] = newP;
 			++movedThisIter;
-			if (bestD > maxDist) maxDist = bestD;
+			if (d > maxDist) maxDist = d;
 		}
 		totalMoved += movedThisIter;
 		if (p_.verbose)

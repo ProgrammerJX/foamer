@@ -19,12 +19,13 @@
 //   * 锥形 / 退化 cell 修复
 
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
-#include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_types.h"
 #include "XFoam/utilities/xfoam_vector.h"
 
 #include <vector>
+
+class XFoam_BrepBase;
 
 /*---------------------------------------------------------------------------*\
                   Class XFoam_CMshMeshOptimizer Declaration
@@ -53,7 +54,7 @@ public:
 
 	XFoam_CMshMeshOptimizer(
 		XFoam_CMshPolyMeshGen& pm,
-		const std::vector<const XFoam_BrepBase*>& breps,
+		const XFoam_BrepBase& brep,
 		const Params& p);
 
 	/// 原地修改 pm.points；返回最末轮 stats。
@@ -62,11 +63,11 @@ public:
 	const std::vector<int>& boundaryPointIds() const { return bndPoints_; }
 
 private:
-	XFoam_CMshPolyMeshGen&              pm_;
-	std::vector<const XFoam_BrepBase*>  breps_;
-	Params                              p_;
-	std::vector<int>                    bndPoints_;
-	std::vector<std::vector<int>>       nbrs_;   ///< 与 bndPoints_ 一一对应；存的是 globalVID
+	XFoam_CMshPolyMeshGen&        pm_;
+	const XFoam_BrepBase&         brep_;
+	Params                        p_;
+	std::vector<int>              bndPoints_;
+	std::vector<std::vector<int>> nbrs_;   ///< 与 bndPoints_ 一一对应；存的是 globalVID
 
 	void buildBoundaryAdjacency();
 	void reprojectOne(int vid);

@@ -6,8 +6,7 @@
 //
 // 把 XFoam_CMshPolyMeshGen 的"boundary point"投到 BrepBase 表面：
 //   1) 扫 boundary faces，收 unique boundary vertex ids
-//   2) 对每个 boundary point，遍历所有 BrepBase 找最近一个，
-//      调用 closestPointAndNormal() 取投影点
+//   2) 对每个 boundary point，调用 brep.closestPointAndNormal() 取投影点
 //   3) points[i] = (1 - relax) * old + relax * projected
 //   4) 多轮迭代（cfMesh 默认 1 轮就够；snap 阶段会循环调用以做 smoothing）
 //
@@ -17,12 +16,13 @@
 //   * patch 拆分（默认还是 1 个 walls patch；将来按 closestSubPatchId 分）
 
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
-#include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_types.h"
 #include "XFoam/utilities/xfoam_vector.h"
 
 #include <vector>
+
+class XFoam_BrepBase;
 
 /*---------------------------------------------------------------------------*\
                   Class XFoam_CMshSurfaceMapper Declaration
@@ -41,7 +41,7 @@ public:
 
 	XFoam_CMshSurfaceMapper(
 		XFoam_CMshPolyMeshGen& pm,
-		const std::vector<const XFoam_BrepBase*>& breps,
+		const XFoam_BrepBase& brep,
 		const Params& p);
 
 	/// 主入口：原地修改 pm.points。返回被实际移动的点数。
@@ -51,10 +51,10 @@ public:
 	const std::vector<int>& boundaryPointIds() const { return bndPoints_; }
 
 private:
-	XFoam_CMshPolyMeshGen&                    pm_;
-	std::vector<const XFoam_BrepBase*>        breps_;
-	Params                                    p_;
-	std::vector<int>                          bndPoints_;
+	XFoam_CMshPolyMeshGen&        pm_;
+	const XFoam_BrepBase&         brep_;
+	Params                        p_;
+	std::vector<int>              bndPoints_;
 
 	void collectBoundaryPoints();
 };

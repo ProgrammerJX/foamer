@@ -19,17 +19,16 @@
 //
 // 支持的事：
 //   * perFacePatches：boundary face 按 brep.closestSubPatchId(faceCenter) 拆
-//     patch；每个 sub-patch 单独成一个 polyMesh boundary patch。multi-brep
-//     时 patch 名格式 "<brepName>_<subPatchName>"。
+//     patch；每个 sub-patch 单独成一个 polyMesh boundary patch。
 
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
-#include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_types.h"
 
 #include <string>
-#include <vector>
+
+class XFoam_BrepBase;
 
 /*---------------------------------------------------------------------------*\
                 Class XFoam_CMshCartesianExtractor Declaration
@@ -57,34 +56,31 @@ public:
 		/// face splitting 假设成立（任意相邻 leaf level 差 ≤ 1）。
 		bool autoBalance = true;
 
-		/// per-surface / per-subPatch boundary patch 拆分。
+		/// per-subPatch boundary patch 拆分。
 		///   * false（默认）：所有 boundary face 都进 defaultPatchName patch
 		///   * true：boundary face 按 brep.closestSubPatchId(faceCenter) 分桶；
-		///     需要同时通过 ctor 传入 breps 列表
+		///     需要同时通过 ctor 传入 brep
 		bool perFacePatches = false;
 
 		/// patch type 总缺省。已知 patch 名（"walls", "inlet", "outlet", ...）
 		/// 可考虑后续做 name → type 映射；MVP 一律用 defaultPatchType。
 	};
 
-	/// 构造：oct 是必需的 octree；breps 仅在 perFacePatches=true 时有效，用来
-	/// 查 closestSubPatchId。breps[0] 通常 = octree 主 brep；多 brep 时 patch
-	/// 名格式 "<brepName_or_idx>_<subPatchName>"。
+	/// 构造：oct 是必需的 octree；brep 仅在 perFacePatches=true 时用，用来
+	/// 查 closestSubPatchId。通常传 octree 主 brep。
 	XFoam_CMshCartesianExtractor(
 		XFoam_CMshOctree& oct,
 		const Params& p,
-		std::vector<const XFoam_BrepBase*> breps = {},
-		std::vector<std::string> brepNames = {});
+		const XFoam_BrepBase* brep = nullptr);
 
 	/// 主入口：clear out → 走完 vertex/face dedup → 填好 out 的 5 张表。
 	/// 返回 false 若 out 是空网格（in-mesh leaf=0）。
 	bool extract(XFoam_CMshPolyMeshGen& out);
 
 private:
-	XFoam_CMshOctree&                    oct_;
-	Params                               p_;
-	std::vector<const XFoam_BrepBase*>   breps_;
-	std::vector<std::string>             brepNames_;
+	XFoam_CMshOctree&             oct_;
+	Params                        p_;
+	const XFoam_BrepBase*         brep_ = nullptr;
 };
 
 #endif // XFoam_CMshCartesianExtractor_H_
