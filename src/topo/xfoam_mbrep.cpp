@@ -1,6 +1,7 @@
 #include "XFoam/topo/xfoam_mbrep.h"
 
 #include <algorithm>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 
@@ -102,6 +103,9 @@ void XFoam_MBrep::clear()
 	faceNames_.clear();
 	faceTypes_.clear();
 	occt_ = XFoam_AutoPtr<OcctData>(new OcctData());
+	featureEdgeIdx_.clear();
+	featureVertIdx_.clear();
+	invalidateBboxCache();
 }
 
 XFoam_BoundBox XFoam_MBrep::bounds() const
@@ -618,17 +622,93 @@ XFoam_Vector3D faceNormalAt(const TopoDS_Face& f, const gp_Pnt& q)
 } // anonymous
 #endif // XFOAM_WITH_OCCT
 
+// =============================================================================
+// 几何查询粗筛缓存 ── 第一次几何查询时一次性构建 per-face / per-solid bbox。
+// 这跟 VBrep 的 ensureAcceleration() 是同一个模式：粗粒度信息缓存到 mutable，
+// 后续 contains / boxIntersects / closestPointAndNormal 用它做 branch-and-bound
+// 剪枝，避免反复调 BRepBndLib::Add（每次都要遍历 face 子树）。
+// =============================================================================
+void XFoam_MBrep::ensureBboxCache() const
+{
+	if (bboxCacheBuilt_) return;
+	faceBboxCache_.clear();
+	solidBboxCache_.clear();
+#ifdef XFOAM_WITH_OCCT
+	const Standard_Integer nFace  = occt_().faceMap.Extent();
+	const Standard_Integer nSolid = occt_().solidMap.Extent();
+	faceBboxCache_.reserve(static_cast<size_t>(nFace));
+	for (Standard_Integer fi = 1; fi <= nFace; ++fi)
+	{
+		Bnd_Box bb;
+		try { BRepBndLib::Add(occt_().faceMap.FindKey(fi), bb); }
+		catch (const Standard_Failure&) {}
+		if (bb.IsVoid())
+		{
+			faceBboxCache_.push_back(XFoam_BoundBox::invertedBox);
+			continue;
+		}
+		Standard_Real xMin, yMin, zMin, xMax, yMax, zMax;
+		bb.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+		faceBboxCache_.emplace_back(
+			XFoam_Vector3D(static_cast<XFoam_Scalar>(xMin),
+			               static_cast<XFoam_Scalar>(yMin),
+			               static_cast<XFoam_Scalar>(zMin)),
+			XFoam_Vector3D(static_cast<XFoam_Scalar>(xMax),
+			               static_cast<XFoam_Scalar>(yMax),
+			               static_cast<XFoam_Scalar>(zMax)));
+	}
+	solidBboxCache_.reserve(static_cast<size_t>(nSolid));
+	for (Standard_Integer si = 1; si <= nSolid; ++si)
+	{
+		Bnd_Box bb;
+		try { BRepBndLib::Add(occt_().solidMap.FindKey(si), bb); }
+		catch (const Standard_Failure&) {}
+		if (bb.IsVoid())
+		{
+			solidBboxCache_.push_back(XFoam_BoundBox::invertedBox);
+			continue;
+		}
+		Standard_Real xMin, yMin, zMin, xMax, yMax, zMax;
+		bb.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+		solidBboxCache_.emplace_back(
+			XFoam_Vector3D(static_cast<XFoam_Scalar>(xMin),
+			               static_cast<XFoam_Scalar>(yMin),
+			               static_cast<XFoam_Scalar>(zMin)),
+			XFoam_Vector3D(static_cast<XFoam_Scalar>(xMax),
+			               static_cast<XFoam_Scalar>(yMax),
+			               static_cast<XFoam_Scalar>(zMax)));
+	}
+#endif
+	bboxCacheBuilt_ = true;
+}
+
 bool XFoam_MBrep::contains(const XFoam_Vector3D& p) const
 {
 #ifdef XFOAM_WITH_OCCT
 	if (occt_().rootShape.IsNull()) return false;
+	ensureBboxCache();
 	try
 	{
-		// SolidClassifier 只对 SOLID 有定义；非 SOLID 时返回 false（开壳无内外）。
-		// 我们对 rootShape 直接喂；若 root 是 Compound，里面任一 SOLID 含 p 即算 contain。
-		for (TopExp_Explorer ex(occt_().rootShape, TopAbs_SOLID); ex.More(); ex.Next())
+		// 两阶段：先 per-SOLID bbox 排除（O(1) per solid）；只对 bbox 真正可能
+		// 包含 p 的 SOLID 才跑 BRepClass3d_SolidClassifier（O(N_face_of_solid)）。
+		// 单 solid CAD 没影响；assembly 多 solid 时性能与命中数 m 而非总数 N 相关。
+		const Standard_Integer nSolid = occt_().solidMap.Extent();
+		if (nSolid <= 0)
 		{
-			BRepClass3d_SolidClassifier cls(TopoDS::Solid(ex.Current()), toOccPnt(p),
+			// rootShape 不含 SOLID（开壳 / Shell-only） → contains 无定义
+			return false;
+		}
+		for (Standard_Integer si = 1; si <= nSolid; ++si)
+		{
+			const size_t idx = static_cast<size_t>(si - 1);
+			if (idx < solidBboxCache_.size())
+			{
+				const XFoam_BoundBox& bb = solidBboxCache_[idx];
+				// 用 bbox.overlaps(point) 等价于 bbox 含 p
+				if (!bb.overlaps(XFoam_BoundBox(p, p))) continue;
+			}
+			const TopoDS_Solid s = TopoDS::Solid(occt_().solidMap.FindKey(si));
+			BRepClass3d_SolidClassifier cls(s, toOccPnt(p),
 			                                static_cast<Standard_Real>(1.0e-7));
 			const TopAbs_State st = cls.State();
 			if (st == TopAbs_IN || st == TopAbs_ON) return true;
@@ -647,37 +727,13 @@ bool XFoam_MBrep::boxIntersects(const XFoam_BoundBox& box) const
 {
 #ifdef XFOAM_WITH_OCCT
 	if (occt_().rootShape.IsNull()) return false;
-	// 粒度选择：用 **per TopoDS_Face bbox** 而不是整 shape bbox。
-	//
-	// 整 shape bbox 的过粗后果：大几何（如 cylinder1.stp 占据 60mm 量级 vs 8mm
-	// base cell）时几乎每个 base cell 都被判相交 → 全部 refine 到 maxLevel，
-	// snappy 的 refine 阶段直接退化成"全网格细化"。
-	//
-	// per-face bbox 仍然保守（永不漏，可能误报；snap 阶段 closestPoint 会再
-	// 精确过滤），但已经能区分 cylinder 表面附近 vs 远端的 cell：每个 TopoDS_Face
-	// 自己的 bbox 比整个 shape 紧得多（圆柱侧面是细长条，圆柱端盖是薄片）。
-	//
-	// 想要再紧可以接 IntCurvesFace_ShapeIntersector（射线 × 面），但代价是
-	// O(N_face) × O(curve solve)，对粗筛阶段太重。
-	for (Standard_Integer fi = 1; fi <= occt_().faceMap.Extent(); ++fi)
+	// per-face bbox vs query box。粒度跟 boxIntersects 之前那版相同（per-face 而
+	// 非 per-shape），但这次走 faceBboxCache_，不再反复 BRepBndLib::Add。
+	// 第一次访问触发 ensureBboxCache()；后续每次查询 O(N_face)，零 OCCT 调用。
+	ensureBboxCache();
+	for (size_t i = 0; i < faceBboxCache_.size(); ++i)
 	{
-		Bnd_Box bb;
-		try
-		{
-			BRepBndLib::Add(occt_().faceMap.FindKey(fi), bb);
-		}
-		catch (const Standard_Failure&) { continue; }
-		if (bb.IsVoid()) continue;
-		Standard_Real xMin, yMin, zMin, xMax, yMax, zMax;
-		bb.Get(xMin, yMin, zMin, xMax, yMax, zMax);
-		const XFoam_BoundBox faceBox(
-			XFoam_Vector3D(static_cast<XFoam_Scalar>(xMin),
-			               static_cast<XFoam_Scalar>(yMin),
-			               static_cast<XFoam_Scalar>(zMin)),
-			XFoam_Vector3D(static_cast<XFoam_Scalar>(xMax),
-			               static_cast<XFoam_Scalar>(yMax),
-			               static_cast<XFoam_Scalar>(zMax)));
-		if (box.overlaps(faceBox)) return true;
+		if (box.overlaps(faceBboxCache_[i])) return true;
 	}
 	return false;
 #else
@@ -686,6 +742,26 @@ bool XFoam_MBrep::boxIntersects(const XFoam_BoundBox& box) const
 		"XFoam_MBrep::boxIntersects: OCCT disabled at build time.");
 #endif
 }
+
+#ifdef XFOAM_WITH_OCCT
+namespace
+{
+
+// p 到 bbox 的最近距离的平方。p 在 bbox 内部时返回 0；用于 branch-and-bound 剪枝。
+inline XFoam_Scalar bboxMinDistSqr(
+	const XFoam_Vector3D& p, const XFoam_BoundBox& bb)
+{
+	const XFoam_Scalar dx = std::max<XFoam_Scalar>(
+		0, std::max<XFoam_Scalar>(bb.min().x() - p.x(), p.x() - bb.max().x()));
+	const XFoam_Scalar dy = std::max<XFoam_Scalar>(
+		0, std::max<XFoam_Scalar>(bb.min().y() - p.y(), p.y() - bb.max().y()));
+	const XFoam_Scalar dz = std::max<XFoam_Scalar>(
+		0, std::max<XFoam_Scalar>(bb.min().z() - p.z(), p.z() - bb.max().z()));
+	return dx * dx + dy * dy + dz * dz;
+}
+
+} // anon
+#endif
 
 void XFoam_MBrep::closestPointAndNormal(
 	const XFoam_Vector3D& p,
@@ -699,38 +775,110 @@ void XFoam_MBrep::closestPointAndNormal(
 		outNormal  = XFoam_Vector3D(0, 0, 0);
 		return;
 	}
+	ensureBboxCache();
+	const Standard_Integer nFace = occt_().faceMap.Extent();
+	if (nFace <= 0 || faceBboxCache_.empty())
+	{
+		outClosest = p;
+		outNormal  = XFoam_Vector3D(0, 0, 0);
+		return;
+	}
+
 	try
 	{
+		// =========================================================
+		// 两阶段 branch-and-bound：
+		//   阶段 1（粗筛）：把每个 TopoDS_Face 按 bbox-min-distance-to-p 排序。
+		//                  这给出"先访问哪些 face 候选"以及"何时可以早停"。
+		//   阶段 2（精化）：按距离顺序逐 face 调 BRepExtrema_DistShapeShape；
+		//                  只要下一个候选的 bbox-min-distance >= 当前已找到的
+		//                  bestDist，就剪枝（剩下的 face 不可能更近）。
+		//
+		// 跟之前一次 BRepExtrema(rootShape) 对比：
+		//   * OCCT 内部对 rootShape 也是遍历所有 face，但它把 face 当 generic
+		//     sub-shape 处理，剪枝粒度粗（按整 shape 的 root bbox）。
+		//   * 我们这里直接拿 per-face bbox 做剪枝，对大 assembly（多 face）
+		//     访问的 face 数 m ≪ N。单几何 CAD（cylinder1 17 face）差异不明显。
+		// =========================================================
 		const TopoDS_Vertex vp = BRepBuilderAPI_MakeVertex(toOccPnt(p));
-		BRepExtrema_DistShapeShape extr(vp, occt_().rootShape);
-		extr.Perform();
-		if (!extr.IsDone() || extr.NbSolution() < 1)
+
+		struct FaceCand
+		{
+			Standard_Integer key;   ///< faceMap.FindKey 用的 1-based 下标
+			XFoam_Scalar     d2min; ///< bbox-min-distance² to p
+		};
+		std::vector<FaceCand> cands;
+		cands.reserve(static_cast<size_t>(nFace));
+		for (Standard_Integer fi = 1; fi <= nFace; ++fi)
+		{
+			const size_t idx = static_cast<size_t>(fi - 1);
+			if (idx >= faceBboxCache_.size()) continue;
+			const XFoam_BoundBox& bb = faceBboxCache_[idx];
+			// invertedBox（min > max）→ bboxMinDistSqr 给出负 → 用 0
+			if (!(bb.min().x() <= bb.max().x())) continue;
+			cands.push_back({fi, bboxMinDistSqr(p, bb)});
+		}
+		std::sort(cands.begin(), cands.end(),
+			[](const FaceCand& a, const FaceCand& b) { return a.d2min < b.d2min; });
+
+		XFoam_Scalar  bestD2 = std::numeric_limits<XFoam_Scalar>::infinity();
+		gp_Pnt        bestQ;
+		bool          bestIsFace = false;
+		TopoDS_Face   bestFace;
+		Standard_Real bestU = 0, bestV = 0;
+		bool          haveSol = false;
+
+		for (size_t ci = 0; ci < cands.size(); ++ci)
+		{
+			// 剪枝：下一个候选 bbox 都比当前 best 远 → 后面更不可能命中
+			if (cands[ci].d2min >= bestD2) break;
+			const TopoDS_Face f = TopoDS::Face(
+				occt_().faceMap.FindKey(cands[ci].key));
+			BRepExtrema_DistShapeShape extr(vp, f);
+			try { extr.Perform(); }
+			catch (const Standard_Failure&) { continue; }
+			if (!extr.IsDone() || extr.NbSolution() < 1) continue;
+			const Standard_Real dval = extr.Value();
+			const XFoam_Scalar d2 = static_cast<XFoam_Scalar>(dval * dval);
+			if (d2 < bestD2)
+			{
+				bestD2 = d2;
+				bestQ  = extr.PointOnShape2(1);
+				const BRepExtrema_SupportType stype = extr.SupportTypeShape2(1);
+				bestIsFace = (stype == BRepExtrema_IsInFace);
+				bestFace = f;
+				if (bestIsFace)
+				{
+					try { extr.ParOnFaceS2(1, bestU, bestV); }
+					catch (const Standard_Failure&) { bestIsFace = false; }
+				}
+				haveSol = true;
+			}
+		}
+		if (!haveSol)
 		{
 			outClosest = p;
 			outNormal  = XFoam_Vector3D(0, 0, 0);
 			return;
 		}
-		const gp_Pnt q = extr.PointOnShape2(1);
-		outClosest = fromOccPnt(q);
-		// 法向：取命中子 shape；若是 FACE → BRepAdaptor_Surface 求 D1；否则 0。
-		const BRepExtrema_SupportType stype = extr.SupportTypeShape2(1);
-		if (stype == BRepExtrema_IsInFace)
+		outClosest = fromOccPnt(bestQ);
+
+		// 法向：FACE 命中 → BRepAdaptor_Surface 在 (u,v) 求 D1 拿真实切平面 ⨯
+		//                  →  解析法向（数值精度，OCCT REVERSED 处理）；
+		//      EDGE/VERTEX → 法向歧义，回退 p→q 单位向量（snap 阶段够用）
+		if (bestIsFace)
 		{
-			const TopoDS_Face f = TopoDS::Face(extr.SupportOnShape2(1));
-			// 在 (u,v) 处取法向更准
-			Standard_Real u = 0, v = 0;
 			try
 			{
-				extr.ParOnFaceS2(1, u, v);
-				BRepAdaptor_Surface bas(f);
+				BRepAdaptor_Surface bas(bestFace);
 				gp_Pnt pp;
 				gp_Vec du, dv;
-				bas.Surface().D1(u, v, pp, du, dv);
+				bas.Surface().D1(bestU, bestV, pp, du, dv);
 				gp_Vec n = du.Crossed(dv);
 				if (n.Magnitude() > 1.0e-12)
 				{
 					n.Normalize();
-					if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
+					if (bestFace.Orientation() == TopAbs_REVERSED) n.Reverse();
 					outNormal = XFoam_Vector3D(
 						static_cast<XFoam_Scalar>(n.X()),
 						static_cast<XFoam_Scalar>(n.Y()),
@@ -739,12 +887,10 @@ void XFoam_MBrep::closestPointAndNormal(
 				}
 			}
 			catch (const Standard_Failure&) {}
-			outNormal = faceNormalAt(f, q);
+			outNormal = faceNormalAt(bestFace, bestQ);
 		}
 		else
 		{
-			// 命中 EDGE / VERTEX → 法向歧义（多 face 共享）。简单回退：用 p→q 单位向量
-			// 作 outward 近似（snap 阶段足够；精确语义可后续接 "找相邻 face 取平均法向"）。
 			const XFoam_Vector3D pq = outClosest - p;
 			const XFoam_Scalar m = pq.mag();
 			outNormal = (m > 0)

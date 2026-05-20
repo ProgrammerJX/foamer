@@ -3,7 +3,10 @@
 
 #include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/topo/xfoam_vbrep.h"
+#include "XFoam/utilities/xfoam_boundbox.h"
 #include "XFoam/utilities/xfoam_common.h"
+
+#include <vector>
 
 // =============================================================================
 // XFoam_MBrep ── 参数化（model / mathematical）B-rep
@@ -160,6 +163,21 @@ private:
 	// 反查 edges_[idx].sampled / verts_[idx].p）。
 	mutable std::vector<XFoam_Label> featureEdgeIdx_;
 	mutable std::vector<XFoam_Label> featureVertIdx_;
+
+	// 几何查询粗筛缓存：boxIntersects / closestPointAndNormal / contains 共用，
+	// 第一次几何查询时由 ensureBboxCache() 一次性建好。
+	//
+	// 设计上跟 VBrep 的 BVH 缓存对应 —— VBrep 缓存三角面 BVH，MBrep 缓存
+	// per-face / per-solid bbox（粒度比 BVH 粗，因为 N_face 通常 ≪ N_tri）。
+	//
+	// 索引规约：faceBboxCache_[i] 对应 occt_().faceMap.FindKey(i+1)；
+	//          solidBboxCache_[i] 对应 occt_().solidMap.FindKey(i+1)。
+	mutable std::vector<XFoam_BoundBox> faceBboxCache_;
+	mutable std::vector<XFoam_BoundBox> solidBboxCache_;
+	mutable bool                        bboxCacheBuilt_ = false;
+
+	void ensureBboxCache() const;
+	void invalidateBboxCache() const { bboxCacheBuilt_ = false; }
 };
 
 #endif // XFoam_MBrep_H_
