@@ -9,6 +9,7 @@
 //                      [-featureAngle 30] [-deflection 1e-2]
 
 #include "XFoam/cmsh/xfoam_cmshcartesianextractor.h"
+#include "XFoam/cmsh/xfoam_cmshmeshoptimizer.h"
 #include "XFoam/cmsh/xfoam_cmshobjrefine.h"
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
@@ -46,6 +47,9 @@ struct Args
 	bool         snapFeatures = false;
 	double       featureSearchRadius = 0; ///< 0 = auto
 	bool         perFacePatches = false;
+	bool         optimize       = false;
+	int          optIter        = 3;
+	double       optRelax       = 0.5;
 
 	/// 命令行多次指定的 object refines
 	struct BoxR    { double xmn, ymn, zmn, xmx, ymx, zmx; int level; };
@@ -91,6 +95,9 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-snapFeatures") == 0) { a.snapFeatures = true; }
 		else if (std::strcmp(arg, "-featureSearchRadius") == 0) { if (!next(a.featureSearchRadius)) return false; }
 		else if (std::strcmp(arg, "-perFacePatches") == 0) { a.perFacePatches = true; }
+		else if (std::strcmp(arg, "-optimize")  == 0) { a.optimize = true; }
+		else if (std::strcmp(arg, "-optIter")   == 0) { if (!nexti(a.optIter))  return false; }
+		else if (std::strcmp(arg, "-optRelax")  == 0) { if (!next(a.optRelax))  return false; }
 		else if (std::strcmp(arg, "-refineBox") == 0)
 		{
 			Args::BoxR b;
@@ -319,6 +326,26 @@ int main(int argc, char** argv)
 					std::cout << "edge extractor done in " << mse3 << " ms (corners=" << st.nCornerSnap
 					          << ", edges=" << st.nEdgeSnap
 					          << ", maxSnapDist=" << st.maxSnapDist << ")\n";
+				}
+				if (A.optimize)
+				{
+					XFoam_CMshMeshOptimizer::Params op;
+					op.nIterations  = A.optIter;
+					op.relaxFactor  = A.optRelax;
+					op.reproject    = true;
+					op.snapFeatures = A.snapFeatures;
+					op.cellSizeHint = A.maxCellSize / static_cast<double>(1 << A.surfLevel);
+					op.verbose      = true;
+					XFoam_CMshMeshOptimizer optr(pm, breps, op);
+					std::cout << "optimizing (boundary Laplacian + reproject, iter=" << op.nIterations
+					          << " relax=" << op.relaxFactor << ")...\n";
+					const auto t8 = std::chrono::steady_clock::now();
+					const auto ost = optr.optimize();
+					const auto t9 = std::chrono::steady_clock::now();
+					const double mse4 = std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t9 - t8).count();
+					std::cout << "optimizer done in " << mse4 << " ms (lastIter moved=" << ost.nMoved
+					          << ", avg=" << ost.avgMove
+					          << ", max=" << ost.maxMove << ")\n";
 				}
 			}
 
