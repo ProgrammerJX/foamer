@@ -1,5 +1,5 @@
 #include "doctest/doctest.h"
-#include "XFoam/mesh/xfoam_primitivemesh.h"
+#include "XFoam/snap/xfoam_primitivemesh.h"
 
 namespace
 {

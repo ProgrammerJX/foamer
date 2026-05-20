@@ -11,7 +11,7 @@
 #include "doctest/doctest.h"
 #include "tcommon.h"
 
-#include "XFoam/block/xfoam_blockmesh.h"
+#include "XFoam/snap/xfoam_blockmesh.h"
 #include "XFoam/snap/xfoam_pointconstraint.h"
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
 #include "XFoam/topo/xfoam_vbrep.h"

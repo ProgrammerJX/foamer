@@ -1,5 +1,5 @@
 #include "doctest/doctest.h"
-#include "XFoam/mesh/xfoam_shape.h"
+#include "XFoam/snap/xfoam_shape.h"
 
 TEST_CASE("XFoam_Face area compare reverseFace edges")
 {

@@ -1,7 +1,7 @@
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
 #include "XFoam/snap/xfoam_pointconstraint.h"
 
-#include "XFoam/block/xfoam_blockmesh.h"
+#include "XFoam/snap/xfoam_blockmesh.h"
 #include "XFoam/snap/xfoam_hex8ref.h"
 #include "XFoam/utilities/xfoam_dictionary.h"
 

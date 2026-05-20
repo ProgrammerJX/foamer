@@ -14,9 +14,9 @@
 // numerical assertions verify topology counts match a single hex.
 #include "doctest/doctest.h"
 #include "tcommon.h"
-#include "XFoam/block/xfoam_blockmesh.h"
-#include "XFoam/mesh/xfoam_polymesh.h"
-#include "XFoam/mesh/xfoam_shape.h"
+#include "XFoam/snap/xfoam_blockmesh.h"
+#include "XFoam/snap/xfoam_polymesh.h"
+#include "XFoam/snap/xfoam_shape.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_dictionary.h"
 

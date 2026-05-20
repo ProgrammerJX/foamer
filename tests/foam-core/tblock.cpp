@@ -1,6 +1,6 @@
 #include "doctest/doctest.h"
-#include "XFoam/block/xfoam_block.h"
-#include "XFoam/block/xfoam_blockface.h"
+#include "XFoam/snap/xfoam_block.h"
+#include "XFoam/snap/xfoam_blockface.h"
 #include "XFoam/utilities/xfoam_common.h"
 
 TEST_CASE("XFoam_BlockDescriptor hex metrics and facePoints")

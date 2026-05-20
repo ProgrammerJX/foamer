@@ -1,9 +1,9 @@
 #include "doctest/doctest.h"
-#include "XFoam/primitive/xfoam_line.h"
-#include "XFoam/primitive/xfoam_triangle.h"
-#include "XFoam/primitive/xfoam_plane.h"
-#include "XFoam/primitive/xfoam_tetrahedron.h"
-#include "XFoam/primitive/xfoam_pyramid.h"
+#include "XFoam/snap/xfoam_line.h"
+#include "XFoam/snap/xfoam_triangle.h"
+#include "XFoam/snap/xfoam_plane.h"
+#include "XFoam/snap/xfoam_tetrahedron.h"
+#include "XFoam/snap/xfoam_pyramid.h"
 #include "XFoam/utilities/xfoam_common.h"
 
 TEST_CASE("XFoam_LinePoints basic and nearestDist point")

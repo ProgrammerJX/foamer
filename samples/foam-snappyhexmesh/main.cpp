@@ -15,7 +15,7 @@
 // 单 region；不做 layer；自适应 refine 用全局 level 代替；多 STL 只用第一个。
 
 #include "XFoam/XFoam_API.h"
-#include "XFoam/block/xfoam_blockmesh.h"
+#include "XFoam/snap/xfoam_blockmesh.h"
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
 #include "XFoam/topo/xfoam_vbrep.h"
 #include "XFoam/utilities/xfoam_common.h"

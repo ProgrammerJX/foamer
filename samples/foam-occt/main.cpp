@@ -33,7 +33,7 @@
 // =============================================================================
 
 #include "XFoam/XFoam_API.h"
-#include "XFoam/block/xfoam_blockmesh.h"
+#include "XFoam/snap/xfoam_blockmesh.h"
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
 #include "XFoam/topo/xfoam_topo.h"
 #include "XFoam/utilities/xfoam_boundbox.h"

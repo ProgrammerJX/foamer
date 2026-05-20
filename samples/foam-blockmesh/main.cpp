@@ -10,9 +10,9 @@
 // 命令行 -region/-time 等。当前 -case 默认 .，dict 默认 <case>/system/blockMeshDict。
 
 #include "XFoam/XFoam_API.h"
-#include "XFoam/block/xfoam_blockmesh.h"
-#include "XFoam/mesh/xfoam_polymesh.h"
-#include "XFoam/mesh/xfoam_polypatch.h"
+#include "XFoam/snap/xfoam_blockmesh.h"
+#include "XFoam/snap/xfoam_polymesh.h"
+#include "XFoam/snap/xfoam_polypatch.h"
 #include "XFoam/utilities/xfoam_common.h"
 #include "XFoam/utilities/xfoam_dictionary.h"
 #include "XFoam/utilities/xfoam_error.h"
