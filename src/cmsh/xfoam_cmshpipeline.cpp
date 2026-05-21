@@ -88,6 +88,8 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 	cp.localFeatureRefine        = p_.localFeatureRefine;
 	cp.localFeatureSafety        = p_.localFeatureSafety;
 	cp.localFeatureSearchMul     = p_.localFeatureSearchMul;
+	cp.curvatureRefine           = p_.curvatureRefine;
+	cp.curvatureSafety           = p_.curvatureSafety;
 
 	XFoam_CMshOctreeCreator cr(brep.bounds(), cp);
 	cr.addSurfaceRefine(brep, p_.surfLevel);

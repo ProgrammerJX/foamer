@@ -59,6 +59,8 @@ struct Args
 	bool         localFeatRef   = false;
 	double       localFeatSafety = 0.5;
 	double       localFeatSearchMul = 2.0;
+	bool         curvRef        = false;
+	double       curvSafety     = 0.2588;
 	bool         coverAllFaces  = false;
 	int          coverRounds    = 3;
 	bool         pinFeatures    = false;
@@ -133,6 +135,8 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-localFeatRef")  == 0) { a.localFeatRef = true; }
 		else if (std::strcmp(arg, "-localFeatSafety") == 0) { if (!next(a.localFeatSafety)) return false; }
 		else if (std::strcmp(arg, "-localFeatSearchMul") == 0) { if (!next(a.localFeatSearchMul)) return false; }
+		else if (std::strcmp(arg, "-curvRef")       == 0) { a.curvRef = true; }
+		else if (std::strcmp(arg, "-curvSafety")    == 0) { if (!next(a.curvSafety)) return false; }
 		else if (std::strcmp(arg, "-coverAllFaces") == 0) { a.coverAllFaces = true; }
 		else if (std::strcmp(arg, "-coverRounds")   == 0) { if (!nexti(a.coverRounds)) return false; }
 		else if (std::strcmp(arg, "-pinFeatures")   == 0) { a.pinFeatures = true; }
@@ -283,6 +287,8 @@ int main(int argc, char** argv)
 		pp.localFeatureRefine        = A.localFeatRef;
 		pp.localFeatureSafety        = static_cast<XFoam_Scalar>(A.localFeatSafety);
 		pp.localFeatureSearchMul     = static_cast<XFoam_Scalar>(A.localFeatSearchMul);
+		pp.curvatureRefine           = A.curvRef;
+		pp.curvatureSafety           = static_cast<XFoam_Scalar>(A.curvSafety);
 		pp.coverAllFaces             = A.coverAllFaces;
 		pp.coverAllFacesMaxRounds    = A.coverRounds;
 		pp.enableFeaturePinner       = A.pinFeatures;

@@ -50,6 +50,11 @@
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <BRepTools.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Surface.hxx>
+#include <Precision.hxx>
 #endif // XFOAM_WITH_OCCT
 
 // =============================================================================
@@ -924,6 +929,50 @@ void XFoam_MBrep::closestPointAndNormal(
 		return;
 	}
 	queryProxy_().closestPointAndNormal(p, outClosest, outNormal);
+}
+
+XFoam_Scalar XFoam_MBrep::localCurvatureRadius(const XFoam_Vector3D& p) const
+{
+#ifdef XFOAM_WITH_OCCT
+	if (faces_.size() == 0) return std::numeric_limits<XFoam_Scalar>::infinity();
+	// 1) 用 VBrep 代理找最近 sub-patch (TopoDS_Face id)。VBrep tri 的 patchId
+	//    = 源 TopoDS_Face id，所以 closestSubPatchId 直接返回 face 下标。
+	const XFoam_Label fid = closestSubPatchId(p);
+	if (fid < 0 || fid >= faces_.size())
+		return std::numeric_limits<XFoam_Scalar>::infinity();
+	const std::size_t mapIdx = static_cast<std::size_t>(fid) + 1; // OCCT IndexedMap 1-based
+	if (mapIdx == 0 || mapIdx > static_cast<std::size_t>(occt_().faceMap.Extent()))
+		return std::numeric_limits<XFoam_Scalar>::infinity();
+	const TopoDS_Face& f = TopoDS::Face(occt_().faceMap.FindKey(static_cast<int>(mapIdx)));
+	if (f.IsNull()) return std::numeric_limits<XFoam_Scalar>::infinity();
+
+	// 2) 把 p 投影到 face 的 underlying surface 上拿 (u,v)
+	const gp_Pnt P(p.x(), p.y(), p.z());
+	Standard_Real uMin, uMax, vMin, vMax;
+	BRepTools::UVBounds(f, uMin, uMax, vMin, vMax);
+	Handle(Geom_Surface) surf = BRep_Tool::Surface(f);
+	if (surf.IsNull()) return std::numeric_limits<XFoam_Scalar>::infinity();
+	GeomAPI_ProjectPointOnSurf proj(P, surf, uMin, uMax, vMin, vMax,
+	                                Precision::Confusion());
+	if (!proj.IsDone() || proj.NbPoints() < 1)
+		return std::numeric_limits<XFoam_Scalar>::infinity();
+	Standard_Real u, v;
+	proj.LowerDistanceParameters(u, v);
+
+	// 3) BRepLProp_SLProps：2nd order，给主曲率
+	BRepAdaptor_Surface sad(f);
+	BRepLProp_SLProps sl(sad, u, v, 2, Precision::Confusion());
+	if (!sl.IsCurvatureDefined())
+		return std::numeric_limits<XFoam_Scalar>::infinity();
+	const double k1 = sl.MinCurvature();
+	const double k2 = sl.MaxCurvature();
+	const double kmax = std::max(std::abs(k1), std::abs(k2));
+	if (kmax <= 1e-30) return std::numeric_limits<XFoam_Scalar>::infinity();
+	return static_cast<XFoam_Scalar>(1.0 / kmax);
+#else
+	(void)p;
+	return std::numeric_limits<XFoam_Scalar>::infinity();
+#endif
 }
 
 void XFoam_MBrep::buildFeatures(XFoam_Scalar featureAngleDeg)

@@ -5,6 +5,8 @@
 #include "XFoam/utilities/xfoam_boundbox.h"
 #include "XFoam/utilities/xfoam_vector.h"
 
+#include <limits>
+
 // =============================================================================
 // 虚拓扑（Virtual Topology）层。本文件定义：
 //
@@ -199,6 +201,19 @@ public:
 	virtual XFoam_BoundBox subPatchBounds(XFoam_Label /*id*/) const
 	{
 		return XFoam_BoundBox(); // invalid
+	}
+
+	/// 给定空间点 p（最好已在 surface 附近），返回该点处 surface 的局部曲
+	/// 率半径 R = 1 / max(|k1|, |k2|)，单位与几何相同。返回 ≤0 或 INF 表
+	/// 示"无法估计 / 该处为平面"。对标 cfMesh
+	/// triSurfaceCurvatureEstimator。
+	///   * MBrep：proj p → 最近 TopoDS_Face → BRepLProp_SLProps 给主曲率
+	///   * VBrep：proj p → 最近三角 → 邻三角法向夹角 / 邻边长，估 R
+	/// 用途：octree 的 refineByCurvature 按 leaf size ≈ R * safety
+	/// （cfMesh 默认 sin(pi/12) ≈ 0.2588）判定加密 level。
+	virtual XFoam_Scalar localCurvatureRadius(const XFoam_Vector3D& /*p*/) const
+	{
+		return std::numeric_limits<XFoam_Scalar>::infinity();
 	}
 
 	/// 单个 sub-patch 的最短 feature 边长（比 minFeatureLength 更精细，按

@@ -279,6 +279,29 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 		}
 	}
 
+	// 4d) curvatureRefine：基于曲率的自适应加密。补 localFeatureRefine 看不
+	//     到的 smooth high-curvature region（球 / 大圆柱表面）。需要
+	//     brep.localCurvatureRadius() 实现（MBrep 走 BRepLProp_SLProps）。
+	if (p_.curvatureRefine && !surfsResolved.empty())
+	{
+		const XFoam_Label nLeavesBefore = oct().nLeaves();
+		oct().refineByCurvature(p_.curvatureSafety, p_.maxLevel);
+		const XFoam_Label nLeavesAfter = oct().nLeaves();
+		std::vector<XFoam_Label> levelHist;
+		oct().countLeavesByLevel(levelHist);
+		std::cout << "  curvatureRefine: leaves "
+		          << nLeavesBefore << " -> " << nLeavesAfter
+		          << " (safety=" << p_.curvatureSafety
+		          << ", cap=" << p_.maxLevel
+		          << "); leaf-level histogram: ";
+		for (std::size_t lv = 0; lv < levelHist.size(); ++lv)
+		{
+			if (levelHist[lv] == 0) continue;
+			std::cout << "L" << lv << "=" << levelHist[lv] << " ";
+		}
+		std::cout << "\n";
+	}
+
 	// 5) region refines
 	for (const auto& rr : regions_)
 	{

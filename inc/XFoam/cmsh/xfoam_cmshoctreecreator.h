@@ -107,6 +107,14 @@ public:
 		XFoam_Scalar localFeatureSafety        = static_cast<XFoam_Scalar>(0.5);
 		XFoam_Scalar localFeatureSearchMul     = static_cast<XFoam_Scalar>(2.0);
 
+		/// 基于 surface 曲率的自适应加密。leaf-size ≈ R * curvatureSafety
+		/// （cfMesh 默认 sin(pi/12) ≈ 0.2588 对应 ~15° per cell）。补
+		/// localFeatureRefine 看不到的"smooth high-curvature region"
+		/// （球 / 大圆柱表面）。需要 brep.localCurvatureRadius() 支持
+		/// （MBrep 走 BRepLProp_SLProps）。
+		bool         curvatureRefine        = false;
+		XFoam_Scalar curvatureSafety        = static_cast<XFoam_Scalar>(0.2588);
+
 		/// 覆盖率兜底：在 fitFeatures / perFaceFitFeatures 跑完之后，仍存在
 		/// "无任何 leaf 的 closestSubPatchId 命中"的 TpFace 时，对那些 face 的
 		/// bbox 进一步局部加密一级一级往上叠，直到每张 face 都有 leaf 命中或

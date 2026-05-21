@@ -177,6 +177,20 @@ public:
 		int          maxLevelCap,
 		XFoam_Scalar searchRadiusMul = static_cast<XFoam_Scalar>(2.0));
 
+	/// 基于 surface 曲率的自适应加密。对每个 surface-touching leaf：
+	///   * 查 brep.localCurvatureRadius(leaf.center) → R
+	///   * 若 R 有限：wanted = R * safety；needed level = ceil(log2(rootSpan
+	///     / wanted)) - 1（leaf size ≈ rootSpan / 2^level）；clamp 到
+	///     [当前 level, maxLevelCap]
+	///   * 若该 leaf 当前 level < needed → 细分
+	///   * 多轮迭代直到不再 progress
+	/// 对标 cfMesh::refineBasedOnCurvature（safety 默认 0.2588 =
+	/// sin(pi/12) 对应"15° per cell"）。补 localFeatureRefine 看不到的
+	/// "smooth high-curvature region"（球 / 大圆柱表面）。
+	void refineByCurvature(
+		XFoam_Scalar safety,
+		int          maxLevelCap);
+
 	/// 返回与给定 bbox 相交的所有 leaf 的最大 level。无相交 leaf 时返回 -1。
 	/// 用于 coverAllSubPatches 兜底循环：决定下一轮 refine 该到哪一级。
 	int maxLeafLevelInBBox(const XFoam_BoundBox& region) const;

@@ -485,6 +485,59 @@ void XFoam_CMshOctree::refineByProximityToFeatures(
 	}
 }
 
+void XFoam_CMshOctree::refineByCurvature(
+	XFoam_Scalar safety,
+	int          maxLevelCap)
+{
+	if (maxLevelCap <= 0) return;
+	if (safety <= 0) safety = static_cast<XFoam_Scalar>(0.2588); // sin(pi/12)
+
+	const XFoam_Vector3D rs = rootBox_.span();
+	const XFoam_Scalar   rsMax = std::max(rs.x(), std::max(rs.y(), rs.z()));
+	if (rsMax <= 0) return;
+
+	bool progressed = true;
+	int  iters      = 0;
+	while (progressed && iters < 32) // 防爆死循环
+	{
+		progressed = false;
+		++iters;
+		std::vector<XFoam_CMshOctreeCube*> snap = leaves_;
+		for (auto* leaf : snap)
+		{
+			if (!leaf || !leaf->isLeaf()) continue;
+			const int lv = static_cast<int>(leaf->level);
+			if (lv >= maxLevelCap) continue;
+			XFoam_Vector3D mn, mx;
+			leaf->cubeBox(rootBox_, mn, mx);
+			XFoam_BoundBox bb(mn, mx);
+			if (!surface_.boxIntersects(bb)) continue;
+
+			const XFoam_Vector3D c(
+				static_cast<XFoam_Scalar>(0.5) * (mn.x() + mx.x()),
+				static_cast<XFoam_Scalar>(0.5) * (mn.y() + mx.y()),
+				static_cast<XFoam_Scalar>(0.5) * (mn.z() + mx.z()));
+			const XFoam_Scalar R = surface_.localCurvatureRadius(c);
+			if (!std::isfinite(R) || R <= 0) continue;
+
+			const XFoam_Scalar wanted = R * safety;
+			if (wanted <= 0) continue;
+			const double ratio = static_cast<double>(rsMax)
+			                   / static_cast<double>(wanted);
+			if (ratio <= 1.0) continue;
+			// leaf size at level L = rootSpan / 2^L；要求 leaf size <= wanted
+			// → 2^L >= rootSpan/wanted → L >= ceil(log2(ratio))
+			int needed = static_cast<int>(std::ceil(std::log(ratio) / std::log(2.0)));
+			const int target = std::min(needed, maxLevelCap);
+			if (lv >= target) continue;
+
+			leaf->subdivide();
+			progressed = true;
+		}
+		if (progressed) rebuildLeaves();
+	}
+}
+
 void XFoam_CMshOctree::refineRegion(const XFoam_BoundBox& region, int targetLevel)
 {
 	if (targetLevel <= 0) return;

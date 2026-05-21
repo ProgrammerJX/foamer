@@ -70,6 +70,14 @@ public:
 		XFoam_Scalar localFeatureSafety       = static_cast<XFoam_Scalar>(0.5);
 		XFoam_Scalar localFeatureSearchMul    = static_cast<XFoam_Scalar>(2.0);
 
+		/// 曲率驱动的自适应加密（cfMesh refineBasedOnCurvature 思路）。
+		/// 对每个 surface-touching leaf 查 brep.localCurvatureRadius，按
+		/// leaf-size ≈ R * curvatureSafety 反推 needed level（safety ~
+		/// 0.2588 = sin(15°)，cfMesh 默认）。补 localFeatureRefine 看不到
+		/// 的 smooth high-curvature region。
+		bool         curvatureRefine          = false;
+		XFoam_Scalar curvatureSafety          = static_cast<XFoam_Scalar>(0.2588);
+
 		/// coverAllFaces：自适应加密循环，对标 cfMesh::automaticRefinement 思路：
 		/// extract → 看哪些 TpFace 没被覆盖 → 对每个未覆盖 face 的 bbox 局部
 		/// refineRegion 到当前 leaf level+1 → 再 extract，直到全覆盖或顶到
