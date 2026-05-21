@@ -22,6 +22,7 @@
 #include "XFoam/cmsh/xfoam_cmshedgeinserter.h"
 #include "XFoam/cmsh/xfoam_cmshfeaturepinner.h"
 #include "XFoam/cmsh/xfoam_cmshmeshoptimizer.h"
+#include "XFoam/cmsh/xfoam_cmshmeshuntangler.h"
 #include "XFoam/cmsh/xfoam_cmshobjrefine.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
 #include "XFoam/cmsh/xfoam_cmshrepatcher.h"
@@ -116,6 +117,14 @@ public:
 		bool         enableFeaturePinner     = false;
 		XFoam_Scalar pinRadius               = 0;   ///< 0 = 自动 = 2*cellSize
 
+		// ---- untangler (修复翻转 boundary face) ----
+		/// optimizer 之后跑：检测翻转/退化 boundary face，对受影响 boundary
+		/// point 试若干候选位置，取使最差质量最大的那个。pinned + inserted
+		/// 点保持不动。
+		bool         enableUntangler         = false;
+		int          untanglerIter           = 3;
+		XFoam_Scalar untanglerTangleDot      = static_cast<XFoam_Scalar>(0.0);
+
 		// ---- edge inserter (B2: TpEdge densify) ----
 		/// 启用后扫所有 boundary face edge，若两端 mesh 点属于不同 sub-patch，
 		/// 在 edge 中点投影到 TpEdge / surface，把新 point 插进所有相关 face
@@ -154,6 +163,7 @@ public:
 		XFoam_CMshFeaturePinner::Stats        pinStats;
 		XFoam_CMshEdgeInserter::Stats         edgeInsertStats;
 		XFoam_CMshMeshOptimizer::Stats        optimizerStats;
+		XFoam_CMshMeshUntangler::Stats        untanglerStats;
 		XFoam_CMshRepatcher::Stats            repatchStats;
 		double msOctree         = 0;
 		double msExtract        = 0;
@@ -162,6 +172,7 @@ public:
 		double msPin            = 0;
 		double msEdgeInsert     = 0;
 		double msOptimizer      = 0;
+		double msUntangler      = 0;
 		double msRepatch        = 0;
 		double msCoverLoop      = 0;
 	};

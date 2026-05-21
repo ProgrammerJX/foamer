@@ -65,6 +65,8 @@ struct Args
 	double       pinRadius      = 0;
 	bool         edgeInsert     = false;
 	double       edgeInsertR    = 0;
+	bool         untangle       = false;
+	int          untangleIter   = 3;
 	bool         useLocationInMesh = false;
 	double       lim[3] = {0, 0, 0};
 
@@ -136,6 +138,8 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-pinRadius")     == 0) { if (!next(a.pinRadius)) return false; }
 		else if (std::strcmp(arg, "-edgeInsert")    == 0) { a.edgeInsert = true; }
 		else if (std::strcmp(arg, "-edgeInsertRadius") == 0) { if (!next(a.edgeInsertR)) return false; }
+		else if (std::strcmp(arg, "-untangle")      == 0) { a.untangle = true; }
+		else if (std::strcmp(arg, "-untangleIter")  == 0) { if (!nexti(a.untangleIter)) return false; }
 		else if (std::strcmp(arg, "-locationInMesh") == 0)
 		{
 			if (!next(a.lim[0]) || !next(a.lim[1]) || !next(a.lim[2])) return false;
@@ -262,6 +266,8 @@ int main(int argc, char** argv)
 		pp.pinRadius                 = static_cast<XFoam_Scalar>(A.pinRadius);
 		pp.enableEdgeInsert          = A.edgeInsert;
 		pp.edgeInsertRadius          = static_cast<XFoam_Scalar>(A.edgeInsertR);
+		pp.enableUntangler           = A.untangle;
+		pp.untanglerIter             = A.untangleIter;
 		pp.perFacePatches          = A.perFacePatches;
 		pp.fillAllSubPatches       = A.fillAllSubPatches;
 		pp.repatchAfterMap         = !A.noRepatch;

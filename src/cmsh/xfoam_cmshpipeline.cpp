@@ -3,6 +3,7 @@
 #include "XFoam/cmsh/xfoam_cmshcartesianextractor.h"
 #include "XFoam/cmsh/xfoam_cmshedgeinserter.h"
 #include "XFoam/cmsh/xfoam_cmshfeaturepinner.h"
+#include "XFoam/cmsh/xfoam_cmshmeshuntangler.h"
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshsurfaceengine.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
@@ -397,6 +398,32 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		}
 	}
 
+	// === 5b) untangler ===
+	if (p_.enableUntangler)
+	{
+		XFoam_CMshMeshUntangler::Params up;
+		up.nIterations  = p_.untanglerIter;
+		up.tangleDot    = p_.untanglerTangleDot;
+		up.cellSizeHint = cellSizeHint;
+		up.reproject    = p_.optReproject;
+		up.verbose      = p_.verbose;
+		XFoam_CMshMeshUntangler unt(pm, &brep, up, *se);
+		if (!pinnedPts.empty()) unt.setFixedPoints(pinnedPts);
+		t0 = std::chrono::steady_clock::now();
+		stats.untanglerStats = unt.untangle();
+		t1 = std::chrono::steady_clock::now();
+		stats.msUntangler = ms(t0, t1);
+		if (p_.verbose)
+		{
+			std::cout << "[cmsh pipeline] untangler done in " << stats.msUntangler
+			          << " ms (tangled " << stats.untanglerStats.nFacesTangled0
+			          << " -> " << stats.untanglerStats.nFacesTangledN
+			          << ", touched=" << stats.untanglerStats.nPointsTouched
+			          << ", improved=" << stats.untanglerStats.nPointsImproved
+			          << ", maxMove=" << stats.untanglerStats.maxMove << ")\n";
+		}
+	}
+
 	// === 6) repatch（perFacePatches 下，用 post-mapped centroid 重写 patches）===
 	if (p_.perFacePatches && p_.repatchAfterMap
 	    && (p_.enableMapper || p_.enableEdgeSnap || p_.enableOptimizer))
@@ -426,7 +453,8 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 	{
 		const double total = stats.msOctree + stats.msExtract + stats.msCoverLoop
 		                   + stats.msMapper + stats.msEdge + stats.msPin
-		                   + stats.msEdgeInsert + stats.msOptimizer + stats.msRepatch;
+		                   + stats.msEdgeInsert + stats.msOptimizer
+		                   + stats.msUntangler + stats.msRepatch;
 		std::cout << "[cmsh pipeline] total " << total << " ms\n";
 	}
 	return stats;
