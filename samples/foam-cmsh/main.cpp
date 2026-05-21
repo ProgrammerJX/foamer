@@ -33,6 +33,7 @@ struct Args
 	std::string  in;
 	double       maxCellSize  = 0.5;
 	int          surfLevel    = 3;
+	int          maxLevel     = 14;
 	double       featureAngle = 30;
 	double       deflection   = 1e-2;
 	std::string  polyMeshOut; ///< 若非空，写出 polyMesh 5 件套到此目录
@@ -55,6 +56,8 @@ struct Args
 	int          fitFeatBump    = 2;
 	bool         perFaceFit     = false;
 	double       perFaceFitSafety = 0.5;
+	bool         coverAllFaces  = false;
+	int          coverRounds    = 3;
 	bool         useLocationInMesh = false;
 	double       lim[3] = {0, 0, 0};
 
@@ -89,6 +92,7 @@ bool parse(int argc, char** argv, Args& a)
 		}
 		else if (std::strcmp(arg, "-maxCellSize") == 0) { if (!next(a.maxCellSize)) return false; }
 		else if (std::strcmp(arg, "-surfLevel")   == 0) { if (!nexti(a.surfLevel))   return false; }
+		else if (std::strcmp(arg, "-maxLevel")    == 0) { if (!nexti(a.maxLevel))    return false; }
 		else if (std::strcmp(arg, "-featureAngle")== 0) { if (!next(a.featureAngle)) return false; }
 		else if (std::strcmp(arg, "-deflection")  == 0) { if (!next(a.deflection))   return false; }
 		else if (std::strcmp(arg, "-polyMeshOut") == 0)
@@ -116,6 +120,8 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-fitFeatBump")   == 0) { if (!nexti(a.fitFeatBump))  return false; }
 		else if (std::strcmp(arg, "-perFaceFit")    == 0) { a.perFaceFit = true; }
 		else if (std::strcmp(arg, "-perFaceFitSafety") == 0) { if (!next(a.perFaceFitSafety)) return false; }
+		else if (std::strcmp(arg, "-coverAllFaces") == 0) { a.coverAllFaces = true; }
+		else if (std::strcmp(arg, "-coverRounds")   == 0) { if (!nexti(a.coverRounds)) return false; }
 		else if (std::strcmp(arg, "-locationInMesh") == 0)
 		{
 			if (!next(a.lim[0]) || !next(a.lim[1]) || !next(a.lim[2])) return false;
@@ -227,12 +233,14 @@ int main(int argc, char** argv)
 		XFoam_CMshPipeline::Params pp;
 		pp.maxCellSize             = static_cast<XFoam_Scalar>(A.maxCellSize);
 		pp.surfLevel               = A.surfLevel;
-		pp.maxLevel                = A.surfLevel + 4;
+		pp.maxLevel                = A.maxLevel;
 		pp.fitFeatures               = A.fitFeatures;
 		pp.fitFeaturesSafety         = static_cast<XFoam_Scalar>(A.fitFeatSafety);
 		pp.fitFeaturesMaxLevelBump   = A.fitFeatBump;
 		pp.perFaceFitFeatures        = A.perFaceFit;
 		pp.perFaceFitFeaturesSafety  = static_cast<XFoam_Scalar>(A.perFaceFitSafety);
+		pp.coverAllFaces             = A.coverAllFaces;
+		pp.coverAllFacesMaxRounds    = A.coverRounds;
 		pp.perFacePatches          = A.perFacePatches;
 		pp.fillAllSubPatches       = A.fillAllSubPatches;
 		pp.repatchAfterMap         = !A.noRepatch;

@@ -83,6 +83,14 @@ public:
 		/// 然后调 refineToSurfacePerFace。需要 brep.subPatchBounds() 支持。
 		bool         perFaceFitFeatures      = false;
 		XFoam_Scalar perFaceFitFeaturesSafety = static_cast<XFoam_Scalar>(0.5);
+
+		/// 覆盖率兜底：在 fitFeatures / perFaceFitFeatures 跑完之后，仍存在
+		/// "无任何 leaf 的 closestSubPatchId 命中"的 TpFace 时，对那些 face 的
+		/// bbox 进一步局部加密一级一级往上叠，直到每张 face 都有 leaf 命中或
+		/// 顶到 maxLevel。可以突破 fitFeaturesMaxLevelBump 的限制（仅对未覆盖
+		/// 的 face 生效，故 leaf 增长可控）。每轮最多 coverPassMaxIters 次。
+		bool coverAllSubPatches    = false;
+		int  coverPassMaxIters     = 6;
 	};
 
 	/// rootBox 通常 = primary brep.bounds()；OctreeCreator 视 inflateRoot 决定

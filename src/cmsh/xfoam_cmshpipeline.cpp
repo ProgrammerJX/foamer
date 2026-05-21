@@ -8,7 +8,9 @@
 #include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/utilities/xfoam_boundbox.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iostream>
 #include <utility>
 
@@ -131,6 +133,8 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 	stats.nFaces         = pm.nFaces();
 	stats.nInternalFaces = pm.nInternalFaces();
 	stats.nPatches       = static_cast<XFoam_Label>(pm.patches.size());
+	stats.nCoveredSubs   = ex.stats().nCoveredSubs;
+	stats.nMissingSubs   = static_cast<XFoam_Label>(ex.stats().missingSubIds.size());
 	if (p_.verbose)
 	{
 		std::cout << "[cmsh pipeline] extract done in " << stats.msExtract
@@ -140,6 +144,89 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		          << " [int " << stats.nInternalFaces
 		          << " / bnd " << pm.nBoundaryFaces() << "]"
 		          << ", patches=" << stats.nPatches << ")\n";
+	}
+
+	// === 2b) coverAllFaces：cfMesh::automaticRefinement 风格的自适应循环 ===
+	// 对每个未命中的 sub-patch，调 refineRegion(subPatchBounds, target)，
+	// target = ceil(log2(rootSpan / (bbox_min_side * safety)))，cap 在 maxLevel。
+	// 突破 perFaceFitFeatures 的 bumpCap（只针对 sliver 面，不全局炸 leaf）。
+	if (p_.coverAllFaces && p_.perFacePatches
+	    && stats.nMissingSubs > 0
+	    && p_.coverAllFacesMaxRounds > 0)
+	{
+		auto tCover0 = std::chrono::steady_clock::now();
+		const XFoam_BoundBox rootBox = brep.bounds(); // 注：oct 用的是 inflate 后的，但 brep.bounds() 用来反推 level 够精度
+		const XFoam_Vector3D rs = rootBox.span();
+		const XFoam_Scalar   rsMax = std::max(rs.x(), std::max(rs.y(), rs.z()));
+		const XFoam_Scalar   safety = p_.perFaceFitFeaturesSafety > 0
+		                                ? p_.perFaceFitFeaturesSafety
+		                                : static_cast<XFoam_Scalar>(0.5);
+
+		for (int round = 0; round < p_.coverAllFacesMaxRounds; ++round)
+		{
+			const auto& mids = ex.stats().missingSubIds;
+			if (mids.empty()) break;
+
+			XFoam_Label nRequested = 0;
+			XFoam_Label nClampedToMax = 0;
+			for (XFoam_Label sid : mids)
+			{
+				const XFoam_BoundBox bb = brep.subPatchBounds(sid);
+				if (bb.max().x() < bb.min().x()) continue; // invalid
+				const XFoam_Vector3D fs = bb.span();
+				XFoam_Scalar minSide = std::min({fs.x(), fs.y(), fs.z()});
+				if (minSide <= 0) continue;
+				const XFoam_Scalar wanted = minSide * safety;
+				if (wanted <= 0 || rsMax <= 0) continue;
+				const double ratio = static_cast<double>(rsMax) / static_cast<double>(wanted);
+				if (ratio <= 1.0) continue;
+				int needed = static_cast<int>(std::ceil(std::log(ratio) / std::log(2.0)));
+				// 每一轮额外 + round 以保证从来没成功的 face 至少多 push 一级
+				needed += round;
+				const int target = std::min(needed, p_.maxLevel);
+				if (target == p_.maxLevel) ++nClampedToMax;
+				// 注意：用 brep.subPatchBounds(sid) 当 region；OCCT 给的精度比 leaf 大，
+				// refineRegion 走 overlaps，已包含 in-leaf 的小 face。
+				oct().refineRegion(bb, target);
+				++nRequested;
+			}
+			oct().balance21();
+			oct().classifyLeaves();
+			if (p_.verbose)
+			{
+				std::cout << "[cmsh pipeline] coverAllFaces round " << round
+				          << ": missing=" << mids.size()
+				          << " requested " << nRequested
+				          << " (" << nClampedToMax << " clamped to maxLevel="
+				          << p_.maxLevel << "), leaves=" << oct().nLeaves() << "\n";
+			}
+
+			// re-extract（overwrite pm）
+			auto re0 = std::chrono::steady_clock::now();
+			const bool reok = ex.extract(pm);
+			auto re1 = std::chrono::steady_clock::now();
+			if (!reok) break;
+			stats.nCells         = pm.nCells;
+			stats.nPoints        = static_cast<XFoam_Label>(pm.points.size());
+			stats.nFaces         = pm.nFaces();
+			stats.nInternalFaces = pm.nInternalFaces();
+			stats.nPatches       = static_cast<XFoam_Label>(pm.patches.size());
+			stats.nCoveredSubs   = ex.stats().nCoveredSubs;
+			stats.nMissingSubs   = static_cast<XFoam_Label>(ex.stats().missingSubIds.size());
+			stats.coverRounds    = round + 1;
+			stats.nLeaves        = oct().nLeaves();
+			if (p_.verbose)
+			{
+				std::cout << "[cmsh pipeline] coverAllFaces round " << round
+				          << " re-extract in " << ms(re0, re1)
+				          << " ms, covered=" << stats.nCoveredSubs
+				          << "/" << ex.stats().nSubPatches
+				          << ", missing=" << stats.nMissingSubs << "\n";
+			}
+			if (stats.nMissingSubs == 0) break;
+		}
+		auto tCover1 = std::chrono::steady_clock::now();
+		stats.msCoverLoop = ms(tCover0, tCover1);
 	}
 
 	// === 3) mapper ===
@@ -251,8 +338,9 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 
 	if (p_.verbose)
 	{
-		const double total = stats.msOctree + stats.msExtract + stats.msMapper
-		                   + stats.msEdge + stats.msOptimizer + stats.msRepatch;
+		const double total = stats.msOctree + stats.msExtract + stats.msCoverLoop
+		                   + stats.msMapper + stats.msEdge + stats.msOptimizer
+		                   + stats.msRepatch;
 		std::cout << "[cmsh pipeline] total " << total << " ms\n";
 	}
 	return stats;

@@ -78,6 +78,17 @@ public:
 		/// 可考虑后续做 name → type 映射；MVP 一律用 defaultPatchType。
 	};
 
+	/// 上次 extract() 的 sub-patch 覆盖情况。perFacePatches=true + brep!=nullptr
+	/// 时填充；其它情况字段全 0/空。
+	/// 用途：pipeline 的 coverAllFaces 自适应加密循环读 missingSubIds，对每
+	/// 个未覆盖 TpFace 局部 refineRegion，再 extract 一次。
+	struct Stats
+	{
+		XFoam_Label               nSubPatches    = 0;  ///< brep.nSubPatches()
+		XFoam_Label               nCoveredSubs   = 0;  ///< 至少有 1 face 落到的 sub-patch 数
+		std::vector<XFoam_Label>  missingSubIds;       ///< 未命中的 sub-patch id 列表
+	};
+
 	/// 构造：oct 是必需的 octree；brep 仅在 perFacePatches=true 时用，用来
 	/// 查 closestSubPatchId。通常传 octree 主 brep。
 	XFoam_CMshCartesianExtractor(
@@ -89,10 +100,13 @@ public:
 	/// 返回 false 若 out 是空网格（in-mesh leaf=0）。
 	bool extract(XFoam_CMshPolyMeshGen& out);
 
+	const Stats& stats() const { return stats_; }
+
 private:
 	XFoam_CMshOctree&             oct_;
 	Params                        p_;
 	const XFoam_BrepBase*         brep_ = nullptr;
+	Stats                         stats_;
 };
 
 #endif // XFoam_CMshCartesianExtractor_H_

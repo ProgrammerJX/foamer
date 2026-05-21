@@ -60,6 +60,14 @@ public:
 		bool         perFaceFitFeatures       = false;
 		XFoam_Scalar perFaceFitFeaturesSafety = static_cast<XFoam_Scalar>(0.5);
 
+		/// coverAllFaces：自适应加密循环，对标 cfMesh::automaticRefinement 思路：
+		/// extract → 看哪些 TpFace 没被覆盖 → 对每个未覆盖 face 的 bbox 局部
+		/// refineRegion 到当前 leaf level+1 → 再 extract，直到全覆盖或顶到
+		/// maxLevel / 达到 coverAllFacesMaxRounds。突破 perFaceFitFeaturesBump
+		/// 限制（只针对实际未覆盖的 sliver 面），不会全局炸 leaf。
+		bool         coverAllFaces            = false;
+		int          coverAllFacesMaxRounds   = 3;
+
 		// ---- extractor ----
 		bool         keepInside              = true;
 		bool         keepData                = true;
@@ -114,6 +122,9 @@ public:
 		XFoam_Label nInternalFaces  = 0;
 		XFoam_Label nPatches        = 0;
 		XFoam_Label mapperMoved     = 0;
+		XFoam_Label nCoveredSubs    = 0;  ///< extractor 完成时被命中的 sub-patch
+		XFoam_Label nMissingSubs    = 0;  ///< 仍未被命中（geometry 丢）
+		int         coverRounds     = 0;  ///< coverAllFaces 实际跑了几轮
 		XFoam_CMshSurfaceEdgeExtractor::Stats edgeStats;
 		XFoam_CMshMeshOptimizer::Stats        optimizerStats;
 		XFoam_CMshRepatcher::Stats            repatchStats;
@@ -123,6 +134,7 @@ public:
 		double msEdge       = 0;
 		double msOptimizer  = 0;
 		double msRepatch    = 0;
+		double msCoverLoop  = 0;
 	};
 
 	explicit XFoam_CMshPipeline(const Params& p);

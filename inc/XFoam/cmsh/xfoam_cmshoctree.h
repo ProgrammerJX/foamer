@@ -158,6 +158,10 @@ public:
 	/// 把所有"box 与 region overlaps"的 leaf 加密到 targetLevel。
 	void refineRegion(const XFoam_BoundBox& region, int targetLevel);
 
+	/// 返回与给定 bbox 相交的所有 leaf 的最大 level。无相交 leaf 时返回 -1。
+	/// 用于 coverAllSubPatches 兜底循环：决定下一轮 refine 该到哪一级。
+	int maxLeafLevelInBBox(const XFoam_BoundBox& region) const;
+
 	/// 全 leaf 一次性细化到 baseLevel；用作建初始格。
 	void refineUniform(int baseLevel);
 

@@ -415,22 +415,30 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 			++hitCount[rf.patchKey];
 		}
 		const XFoam_Label nSub = brep_->nSubPatches();
+		stats_.nSubPatches  = nSub;
+		stats_.nCoveredSubs = static_cast<XFoam_Label>(hitCount.size());
+		stats_.missingSubIds.clear();
+		for (XFoam_Label s = 0; s < nSub; ++s)
+		{
+			if (hitCount.find(static_cast<int>(s + 1)) == hitCount.end())
+				stats_.missingSubIds.push_back(s);
+		}
 		std::cout << "cmsh extractor: brep has " << nSub
 		          << " subPatches, mesh boundary touched "
 		          << hitCount.size() << " of them ("
 		          << (nSub > 0 ? (100.0 * hitCount.size() / nSub) : 0)
 		          << "% coverage)\n";
-		if (static_cast<XFoam_Label>(hitCount.size()) < nSub)
+		if (!stats_.missingSubIds.empty())
 		{
-			const XFoam_Label nMissing = nSub - static_cast<XFoam_Label>(hitCount.size());
+			const XFoam_Label nMissing = static_cast<XFoam_Label>(stats_.missingSubIds.size());
 			std::cout << "cmsh extractor: WARNING " << nMissing
 			          << " TopoDS_Face(s) have no boundary mesh face — refine to "
 			             "preserve geometry, or enable fillAllSubPatches to keep "
 			             "placeholder patches. First missing:\n";
 			int printed = 0;
-			for (XFoam_Label s = 0; s < nSub && printed < 10; ++s)
+			for (XFoam_Label idx = 0; idx < nMissing && printed < 10; ++idx)
 			{
-				if (hitCount.find(static_cast<int>(s + 1)) != hitCount.end()) continue;
+				const XFoam_Label s = stats_.missingSubIds[static_cast<std::size_t>(idx)];
 				const XFoam_String sn = brep_->subPatchName(s);
 				const std::string nm = static_cast<const std::string&>(sn);
 				std::cout << "    [" << s << "] " << (nm.empty() ? "sub" + std::to_string(s) : nm) << "\n";
@@ -441,6 +449,10 @@ bool XFoam_CMshCartesianExtractor::extract(XFoam_CMshPolyMeshGen& out)
 				std::cout << "    ... and " << (nMissing - printed) << " more.\n";
 			}
 		}
+	}
+	else
+	{
+		stats_ = Stats{};
 	}
 
 	std::sort(internalIdx.begin(), internalIdx.end(),
