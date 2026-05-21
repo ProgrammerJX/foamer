@@ -2045,39 +2045,239 @@ bool XFoam_SnappyHexMesh::run(
 					else ++itc->second;
 				}
 			}
-			// (c) ringV[v][k] = ring k 上的 vertex id（k=0..nL-1 为新点；k=nL 用原 v）。
-			std::unordered_map<int, std::vector<int>> ringV;
-			ringV.reserve(pNormSum.size());
-			for (auto& kv : pNormSum)
+			// (c) per-vertex (unit normal, first-layer thickness) 数组化，方便后续
+			//     做 normal smoothing / thickness smoothing / medialAxis cap。
+			// vIdList：稳定的 vertex 列表（unordered_map 取出排序后用），其他数组
+			// 以这条索引同步。
+			std::vector<int> vIdList;
+			vIdList.reserve(pNormSum.size());
+			for (auto& kv : pNormSum) vIdList.push_back(kv.first);
+			std::sort(vIdList.begin(), vIdList.end());
+			const size_t nVV = vIdList.size();
+			std::unordered_map<int, int> vIdToLocal;
+			vIdToLocal.reserve(nVV * 2);
+			for (size_t li = 0; li < nVV; ++li) vIdToLocal[vIdList[li]] = static_cast<int>(li);
+
+			std::vector<XFoam_Vector3D> N(nVV, XFoam_Vector3D(0,0,0));
+			std::vector<XFoam_Scalar>   T0(nVV, layer_.firstLayerThickness);
+			std::vector<char>           degen(nVV, 0);   ///< 0 normal 退化
+			for (size_t li = 0; li < nVV; ++li)
 			{
-				const int curV = kv.first;
-				const XFoam_Vector3D rawN = kv.second;
+				const int v = vIdList[li];
+				const XFoam_Vector3D rawN = pNormSum[v];
 				const XFoam_Scalar mag = rawN.mag();
-				if (mag <= 0)
+				if (mag <= 0) { degen[li] = 1; continue; }
+				const XFoam_Scalar inv = static_cast<XFoam_Scalar>(1) / mag;
+				N[li] = XFoam_Vector3D(rawN.x()*inv, rawN.y()*inv, rawN.z()*inv);
+				if (layer_.relativeSizes)
 				{
-					// 退化点：normal 为 0；把 ringV 全设成 curV，使生成的 prism cell 退化为 0
-					// 体积（不会导致 polyMesh 写入失败，但会被 validate-and-relax 标 bad）。
+					const auto ita = pAreaSum.find(v);
+					const auto itc = pIncCount.find(v);
+					if (ita != pAreaSum.end() && itc != pIncCount.end() && itc->second > 0)
+					{
+						const XFoam_Scalar avgA = ita->second /
+							static_cast<XFoam_Scalar>(itc->second);
+						const XFoam_Scalar L = std::sqrt(std::max<XFoam_Scalar>(avgA, 0));
+						T0[li] = layer_.firstLayerThickness * L;
+					}
+				}
+			}
+
+			// (c.1) 在 patch 上建 vertex→vertex 邻接 + face 法向缓存，用来：
+			//       - sharp edge 检测（featureAngle）：cos > cos(featureAngle) 当成
+			//         相邻；否则跨"折痕"，做 normal/thickness smoothing 时不互相平均
+			//       - Laplacian smoothing
+			// 邻接 key：face 上连续两个顶点构成 edge。
+			std::vector<std::vector<int>> nbrLocal(nVV);
+			{
+				std::unordered_map<long long, int> edgeSeen; // key = (min<<32)|max
+				auto pairKey = [](int a, int b)->long long {
+					int lo = a < b ? a : b, hi = a < b ? b : a;
+					return (static_cast<long long>(static_cast<uint32_t>(lo)) << 32) |
+					        static_cast<long long>(static_cast<uint32_t>(hi));
+				};
+				const XFoam_Scalar cosFeat = std::cos(layer_.featureAngle *
+					static_cast<XFoam_Scalar>(3.14159265358979323846 / 180.0));
+				// 先把 patch face 法向缓存
+				std::unordered_map<int, XFoam_Vector3D> faceN;
+				faceN.reserve(patchFaces.size() * 2);
+				for (int fi : patchFaces)
+				{
+					XFoam_Vector3D a = faceAreaVec(finalFaces[fi]);
+					const XFoam_Scalar mg = a.mag();
+					if (mg > 0) a = XFoam_Vector3D(a.x()/mg, a.y()/mg, a.z()/mg);
+					faceN[fi] = a;
+				}
+				// edge → 两个 face；如果只一个 face 共享，认为 patch 边界 → 总是 sharp
+				std::unordered_map<long long, std::pair<int,int>> edgeFaces;
+				edgeFaces.reserve(patchFaces.size() * 4);
+				for (int fi : patchFaces)
+				{
+					const auto& fv = finalFaces[fi].verts;
+					const int n = static_cast<int>(fv.size());
+					for (int i = 0; i < n; ++i)
+					{
+						const int a = fv[i], b = fv[(i + 1) % n];
+						const long long k = pairKey(a, b);
+						auto it = edgeFaces.find(k);
+						if (it == edgeFaces.end()) edgeFaces.emplace(k, std::make_pair(fi, -1));
+						else if (it->second.second < 0) it->second.second = fi;
+					}
+				}
+				for (auto& kv : edgeFaces)
+				{
+					const long long k = kv.first;
+					const int a = static_cast<int>(k >> 32);
+					const int b = static_cast<int>(k & 0xFFFFFFFFLL);
+					const auto& fp = kv.second;
+					bool sharp = false;
+					if (fp.second < 0) sharp = true; // patch 边界
+					else
+					{
+						const auto ita = faceN.find(fp.first);
+						const auto itb = faceN.find(fp.second);
+						if (ita != faceN.end() && itb != faceN.end())
+						{
+							const XFoam_Scalar d = ita->second.x()*itb->second.x()
+							                     + ita->second.y()*itb->second.y()
+							                     + ita->second.z()*itb->second.z();
+							if (d < cosFeat) sharp = true;
+						}
+					}
+					if (sharp) continue; // smoothing 不跨 sharp edge
+					const auto la = vIdToLocal.find(a);
+					const auto lb = vIdToLocal.find(b);
+					if (la == vIdToLocal.end() || lb == vIdToLocal.end()) continue;
+					nbrLocal[static_cast<size_t>(la->second)].push_back(lb->second);
+					nbrLocal[static_cast<size_t>(lb->second)].push_back(la->second);
+				}
+				for (auto& nb : nbrLocal)
+				{
+					std::sort(nb.begin(), nb.end());
+					nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+				}
+			}
+
+			// (c.2) Laplacian 平滑 normal（nSmoothNormals + nSmoothSurfaceNormals 合并）
+			//       —— 对 degenerated 顶点跳过。每轮后重新归一。
+			{
+				const int totalIter = static_cast<int>(
+					std::max<XFoam_Label>(0, layer_.nSmoothNormals) +
+					std::max<XFoam_Label>(0, layer_.nSmoothSurfaceNormals));
+				const XFoam_Scalar w = static_cast<XFoam_Scalar>(0.5);
+				std::vector<XFoam_Vector3D> Ntmp(nVV);
+				for (int it = 0; it < totalIter; ++it)
+				{
+					for (size_t li = 0; li < nVV; ++li)
+					{
+						if (degen[li] || nbrLocal[li].empty()) { Ntmp[li] = N[li]; continue; }
+						XFoam_Vector3D avg(0,0,0);
+						int nv = 0;
+						for (int nb : nbrLocal[li])
+						{
+							if (degen[static_cast<size_t>(nb)]) continue;
+							avg.x() += N[static_cast<size_t>(nb)].x();
+							avg.y() += N[static_cast<size_t>(nb)].y();
+							avg.z() += N[static_cast<size_t>(nb)].z();
+							++nv;
+						}
+						if (nv == 0) { Ntmp[li] = N[li]; continue; }
+						const XFoam_Scalar inv = static_cast<XFoam_Scalar>(1) /
+							static_cast<XFoam_Scalar>(nv);
+						avg.x() *= inv; avg.y() *= inv; avg.z() *= inv;
+						XFoam_Vector3D nn(
+							(1 - w) * N[li].x() + w * avg.x(),
+							(1 - w) * N[li].y() + w * avg.y(),
+							(1 - w) * N[li].z() + w * avg.z());
+						const XFoam_Scalar mg = nn.mag();
+						if (mg > 0) { nn.x()/=mg; nn.y()/=mg; nn.z()/=mg; }
+						else nn = N[li];
+						Ntmp[li] = nn;
+					}
+					N.swap(Ntmp);
+				}
+			}
+
+			// (c.3) Laplacian 平滑 first-layer 厚度（nSmoothThickness 轮）。同 sharp
+			//       edge 不跨。给极端突变以连续过渡，避免 prism 层厚跳变。
+			{
+				const int nIter = static_cast<int>(std::max<XFoam_Label>(0, layer_.nSmoothThickness));
+				const XFoam_Scalar w = static_cast<XFoam_Scalar>(0.5);
+				std::vector<XFoam_Scalar> Ttmp(nVV);
+				for (int it = 0; it < nIter; ++it)
+				{
+					for (size_t li = 0; li < nVV; ++li)
+					{
+						if (degen[li] || nbrLocal[li].empty()) { Ttmp[li] = T0[li]; continue; }
+						XFoam_Scalar avg = 0; int nv = 0;
+						for (int nb : nbrLocal[li]) { avg += T0[static_cast<size_t>(nb)]; ++nv; }
+						avg /= static_cast<XFoam_Scalar>(nv);
+						Ttmp[li] = (1 - w) * T0[li] + w * avg;
+					}
+					T0.swap(Ttmp);
+				}
+			}
+
+			// (c.4) 简化 medialAxis：沿 -N_v 方向收集"对面"patch face 距离上限。
+			//       MVP 走 incident face 平均距离 + 邻接 vertex 间距比对，而不做
+			//       全局 ray-march（O(P) 而不是 O(P*F)）。具体：
+			//         d_v = min(
+			//             邻接 vertex j 到 v 沿 -N_v 投影距离，
+			//             相邻 face 间 cellSize 的 1/maxThicknessToMedialRatio,
+			//             ∞ )
+			//       totalShift_v ≤ maxThicknessToMedialRatio * d_v；再除以 cumRel[nL]
+			//       反推可用 t0_v_cap，T0[li] = min(T0[li], cap)。
+			{
+				const XFoam_Scalar mtr = static_cast<XFoam_Scalar>(layer_.maxThicknessToMedialRatio);
+				if (mtr > 0)
+				{
+					const XFoam_Scalar invCumN = static_cast<XFoam_Scalar>(1) /
+						std::max<XFoam_Scalar>(cumRel[static_cast<size_t>(nL)],
+							static_cast<XFoam_Scalar>(1e-30));
+					for (size_t li = 0; li < nVV; ++li)
+					{
+						if (degen[li]) continue;
+						const int v = vIdList[li];
+						const XFoam_Vector3D Pv = pts[v];
+						const XFoam_Vector3D Nv = N[li];
+						XFoam_Scalar dmin = std::numeric_limits<XFoam_Scalar>::infinity();
+						for (int nb : nbrLocal[li])
+						{
+							const int u = vIdList[static_cast<size_t>(nb)];
+							const XFoam_Vector3D Pu = pts[u];
+							const XFoam_Vector3D du(Pu.x()-Pv.x(), Pu.y()-Pv.y(), Pu.z()-Pv.z());
+							// |du| 投影到 -Nv 方向 取正分量；正 = u 在 v 的"内侧"
+							const XFoam_Scalar pr = -(du.x()*Nv.x() + du.y()*Nv.y() + du.z()*Nv.z());
+							if (pr > 0 && pr < dmin) dmin = pr;
+							const XFoam_Scalar mg = du.mag();
+							if (mg < dmin) dmin = mg;
+						}
+						if (!std::isfinite(dmin)) continue;
+						const XFoam_Scalar capTotal = mtr * dmin;            // 限制总层厚
+						const XFoam_Scalar capT0    = capTotal * invCumN;     // 反推首层厚
+						if (capT0 < T0[li]) T0[li] = capT0;
+						if (T0[li] < layer_.minThickness * static_cast<XFoam_Scalar>(0.0001))
+						{
+							// 极端塌缩 → 标退化，跳过 extrude
+							degen[li] = 1;
+						}
+					}
+				}
+			}
+
+			// (c.5) ringV[v][k] = ring k 上的 vertex id（k=0..nL-1 为新点；k=nL 用原 v）。
+			std::unordered_map<int, std::vector<int>> ringV;
+			ringV.reserve(nVV);
+			for (size_t li = 0; li < nVV; ++li)
+			{
+				const int curV = vIdList[li];
+				if (degen[li])
+				{
 					ringV.emplace(curV, std::vector<int>(static_cast<size_t>(nL), curV));
 					continue;
 				}
-				const XFoam_Scalar inv = static_cast<XFoam_Scalar>(1) / mag;
-				const XFoam_Vector3D n(rawN.x() * inv, rawN.y() * inv, rawN.z() * inv);
-
-				// per-vertex 首层厚度。relativeSizes=true 时 scale_v = sqrt(avg incident face
-				// area)；false 时 scale_v = 1。
-				XFoam_Scalar t0_v = layer_.firstLayerThickness;
-				if (layer_.relativeSizes)
-				{
-					const auto ita = pAreaSum.find(curV);
-					const auto itc = pIncCount.find(curV);
-					if (ita != pAreaSum.end() && itc != pIncCount.end() && itc->second > 0)
-					{
-						const XFoam_Scalar avgA = ita->second / static_cast<XFoam_Scalar>(itc->second);
-						const XFoam_Scalar L = std::sqrt(std::max<XFoam_Scalar>(avgA, 0));
-						t0_v = layer_.firstLayerThickness * L;
-					}
-				}
-
+				const XFoam_Vector3D n = N[li];
+				const XFoam_Scalar t0_v = T0[li];
 				const XFoam_Vector3D Pstl = pts[curV];
 				std::vector<int> rings(static_cast<size_t>(nL));
 				for (XFoam_Label k = 0; k < nL; ++k)
@@ -2091,7 +2291,6 @@ bool XFoam_SnappyHexMesh::run(
 					pts.push_back(pNew);
 					++stats.nLayerPointsAdded;
 				}
-				// 把原 vertex 平移到 ring N（最深）。
 				const XFoam_Scalar totalShift = t0_v * cumRel[static_cast<size_t>(nL)];
 				pts[curV] = XFoam_Vector3D(
 					Pstl.x() - n.x() * totalShift,
