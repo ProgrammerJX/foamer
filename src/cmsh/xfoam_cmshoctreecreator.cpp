@@ -35,6 +35,13 @@ XFoam_CMshOctreeCreator& XFoam_CMshOctreeCreator::addObjectRefine(
 	return *this;
 }
 
+XFoam_CMshOctreeCreator& XFoam_CMshOctreeCreator::addPatchRefine(
+	const std::string& name, int level)
+{
+	if (!name.empty()) patches_.push_back(PatchRefine{name, level});
+	return *this;
+}
+
 XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 {
 	if (surfs_.empty() || surfs_.front().brep == nullptr)
@@ -120,9 +127,10 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 		oct().refineToSurface(lv);
 	}
 
-	// 4b) perFaceFitFeatures：按每张 TopoDS_Face 自己 bbox 反推额外 level
-	//     只对 primary surface 生效（与 oct.surface_ 一致才能用 closestSubPatchId）。
-	if (p_.perFaceFitFeatures && !surfsResolved.empty())
+	// 4b) perFaceFitFeatures / patchRefine：两者都在 perFaceLevel 上叠加，
+	//     最后调一次 refineToSurfacePerFace。当 perFaceFitFeatures=false 但
+	//     patches_ 非空时仍走这条路径。
+	if ((p_.perFaceFitFeatures || !patches_.empty()) && !surfsResolved.empty())
 	{
 		const auto& sr  = surfsResolved.front();
 		const auto* bp  = sr.brep;
@@ -140,6 +148,7 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 				int maxRequest  = baseSurfLv; ///< 真正想要的最大 level（截断前）
 				int nWonByEdge  = 0;     ///< 控制边长被最短 feature edge 决定，不是 bbox
 				std::vector<int> levelHist(static_cast<std::size_t>(p_.maxLevel + 1), 0);
+				if (p_.perFaceFitFeatures)
 				for (XFoam_Label s = 0; s < nSub; ++s)
 				{
 					const XFoam_BoundBox b = bp->subPatchBounds(s);
@@ -167,15 +176,45 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 						++nBumped;
 					}
 				}
+				// patchRefine：用户给的 name → level 覆盖（max），可以突破 bumpCap
+				// 直到 maxLevel，用于精确控制特定 patch 的加密程度（对标 cfMesh
+				// patchRefinementControls）。
+				int nPatchBumped = 0, nPatchMissed = 0;
+				for (const auto& pr : patches_)
+				{
+					const int target = std::min(pr.level, p_.maxLevel);
+					const auto ids = bp->subPatchIdsByName(pr.name);
+					if (ids.empty())
+					{
+						++nPatchMissed;
+						std::cout << "  patchRefine: name='" << pr.name
+						          << "' matched 0 sub-patch (skipped)\n";
+						continue;
+					}
+					for (XFoam_Label s : ids)
+					{
+						if (s < 0 || s >= nSub) continue;
+						if (target > perFaceLevel[static_cast<std::size_t>(s)])
+						{
+							perFaceLevel[static_cast<std::size_t>(s)] = target;
+							++nPatchBumped;
+						}
+					}
+					std::cout << "  patchRefine: '" << pr.name << "' -> L"
+					          << target << " on " << ids.size() << " sub-patch(es)\n";
+				}
+				// 重算 hist + nBumped 视图
 				for (XFoam_Label s = 0; s < nSub; ++s)
 				{
 					const int lv = perFaceLevel[static_cast<std::size_t>(s)];
 					if (lv >= 0 && lv <= p_.maxLevel) ++levelHist[static_cast<std::size_t>(lv)];
 				}
-				if (nBumped > 0)
+				const int totalBumped = nBumped + nPatchBumped;
+				if (totalBumped > 0)
 				{
-					std::cout << "  perFaceFitFeatures: bumped " << nBumped
-					          << "/" << nSub << " TopoDS_Face levels (cap="
+					std::cout << "  perFaceLevel: bumped " << totalBumped
+					          << "/" << nSub << " TopoDS_Face (fit=" << nBumped
+					          << ", patch=" << nPatchBumped << "; cap="
 					          << bumpCap << ", max wanted=" << maxRequest;
 					if (nCapped > 0)    std::cout << ", " << nCapped << " capped";
 					if (nWonByEdge > 0) std::cout << ", " << nWonByEdge << " by minEdge";
@@ -189,7 +228,7 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 					std::cout << "\n";
 					oct().refineToSurfacePerFace(perFaceLevel, p_.maxLevel);
 				}
-				else
+				else if (p_.perFaceFitFeatures)
 				{
 					std::cout << "  perFaceFitFeatures: no TopoDS_Face required "
 					             "bump above surfLevel=" << baseSurfLv << "\n";

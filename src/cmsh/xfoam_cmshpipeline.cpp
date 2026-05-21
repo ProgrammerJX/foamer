@@ -97,6 +97,9 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 	}
 	objects_.clear();
 
+	for (const auto& kv : p_.patchRefine)
+		cr.addPatchRefine(kv.first, kv.second);
+
 	if (p_.verbose)
 	{
 		std::cout << "[cmsh pipeline] building octree (maxCellSize=" << p_.maxCellSize

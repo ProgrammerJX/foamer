@@ -117,6 +117,12 @@ public:
 		bool         enableFeaturePinner     = false;
 		XFoam_Scalar pinRadius               = 0;   ///< 0 = 自动 = 2*cellSize
 
+		// ---- patchRefine：name -> level，覆盖到 perFaceFitFeatures 之上 ----
+		/// 每条规则会展开成 brep.subPatchIdsByName(name) 列表内所有 sub-patch
+		/// 的 perFaceLevel 取 max。常用 VBrep STL solid name / MBrep 自动
+		/// face_<id> 名。
+		std::vector<std::pair<std::string, int>> patchRefine;
+
 		// ---- untangler (修复翻转 boundary face) ----
 		/// optimizer 之后跑：检测翻转/退化 boundary face，对受影响 boundary
 		/// point 试若干候选位置，取使最差质量最大的那个。pinned + inserted

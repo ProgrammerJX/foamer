@@ -23,6 +23,7 @@
 #include "XFoam/utilities/xfoam_types.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 class XFoam_BrepBase;
@@ -44,6 +45,17 @@ public:
 	{
 		XFoam_BoundBox box;
 		int            level = 0;
+	};
+
+	/// 按 patch name（= brep.subPatchName(id)）指定 target level，对标
+	/// cfMesh patchRefinementControls。Creator 在 build() 里把 name 用
+	/// brep.subPatchIdsByName 展开成 per-sub-patch level，再与
+	/// perFaceFitFeatures 取 max，最终传给 octree.refineToSurfacePerFace。
+	/// 没有任何匹配 sub-patch 的 rule 静默忽略（verbose 模式打印警告）。
+	struct PatchRefine
+	{
+		std::string  name;
+		int          level = 0;
 	};
 
 	struct Params
@@ -110,6 +122,7 @@ public:
 
 	XFoam_CMshOctreeCreator& addSurfaceRefine(const XFoam_BrepBase& s, int level);
 	XFoam_CMshOctreeCreator& addRegionRefine(const XFoam_BoundBox& region, int level);
+	XFoam_CMshOctreeCreator& addPatchRefine(const std::string& name, int level);
 
 	/// 加入一个 objectRefinement（box/sphere/cone 等）。Creator 接管所有权。
 	/// 与 RegionRefine 的差别：RegionRefine 只能 box；ObjectRefine 可以是任意
@@ -132,6 +145,7 @@ private:
 	Params                     p_;
 	std::vector<SurfaceRefine>                         surfs_;
 	std::vector<RegionRefine>                          regions_;
+	std::vector<PatchRefine>                           patches_;
 	std::vector<std::unique_ptr<XFoam_CMshObjRefine>>  objects_;
 };
 

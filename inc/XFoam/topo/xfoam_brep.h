@@ -175,6 +175,23 @@ public:
 	virtual XFoam_String subPatchName(XFoam_Label /*id*/) const { return XFoam_String(); }
 	virtual XFoam_Label closestSubPatchId(const XFoam_Vector3D& /*p*/) const { return -1; }
 
+	/// 把"patch 名"反查为 sub-patch id 列表。默认实现：遍历 [0, nSubPatches)
+	/// 找 subPatchName(id) 与 query 完全一致者；空字符串总返回空表。子类
+	/// 可以 override 走 hash 加速。用途：cmsh patchRefinement 把用户的
+	/// `wall=4` 规则展开成 per-sub-patch level override。
+	virtual std::vector<XFoam_Label> subPatchIdsByName(const XFoam_String& name) const
+	{
+		std::vector<XFoam_Label> out;
+		if (name.empty()) return out;
+		const XFoam_Label n = nSubPatches();
+		out.reserve(static_cast<std::size_t>(n));
+		for (XFoam_Label i = 0; i < n; ++i)
+		{
+			if (subPatchName(i) == name) out.push_back(i);
+		}
+		return out;
+	}
+
 	/// 单个 sub-patch 的 bbox。MBrep 走 BRepBndLib 取 TopoDS_Face bbox；VBrep
 	/// 走该 patchId 下所有三角面 union。无效 id / 不支持时返回 invalid bbox。
 	/// 用途：creator 的 per-face fitFeatures 按每张 TpFace 自己的尺度反推

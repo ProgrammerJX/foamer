@@ -67,6 +67,7 @@ struct Args
 	double       edgeInsertR    = 0;
 	bool         untangle       = false;
 	int          untangleIter   = 3;
+	std::vector<std::pair<std::string, int>> patchRefine; ///< "name=level,..."
 	bool         useLocationInMesh = false;
 	double       lim[3] = {0, 0, 0};
 
@@ -140,6 +141,28 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-edgeInsertRadius") == 0) { if (!next(a.edgeInsertR)) return false; }
 		else if (std::strcmp(arg, "-untangle")      == 0) { a.untangle = true; }
 		else if (std::strcmp(arg, "-untangleIter")  == 0) { if (!nexti(a.untangleIter)) return false; }
+		else if (std::strcmp(arg, "-patchRefine")   == 0)
+		{
+			if (i + 1 >= argc) return false;
+			const std::string s = argv[++i];
+			std::size_t pos = 0;
+			while (pos < s.size())
+			{
+				const std::size_t comma = s.find(',', pos);
+				const std::string tok = s.substr(pos, comma - pos);
+				const std::size_t eq = tok.find('=');
+				if (eq != std::string::npos)
+				{
+					try {
+						a.patchRefine.emplace_back(tok.substr(0, eq), std::stoi(tok.substr(eq + 1)));
+					} catch (...) {
+						std::cerr << "  bad -patchRefine entry: '" << tok << "'\n";
+					}
+				}
+				if (comma == std::string::npos) break;
+				pos = comma + 1;
+			}
+		}
 		else if (std::strcmp(arg, "-locationInMesh") == 0)
 		{
 			if (!next(a.lim[0]) || !next(a.lim[1]) || !next(a.lim[2])) return false;
@@ -268,6 +291,7 @@ int main(int argc, char** argv)
 		pp.edgeInsertRadius          = static_cast<XFoam_Scalar>(A.edgeInsertR);
 		pp.enableUntangler           = A.untangle;
 		pp.untanglerIter             = A.untangleIter;
+		pp.patchRefine               = A.patchRefine;
 		pp.perFacePatches          = A.perFacePatches;
 		pp.fillAllSubPatches       = A.fillAllSubPatches;
 		pp.repatchAfterMap         = !A.noRepatch;
