@@ -78,6 +78,22 @@ public:
 		                                   ///< 替代 snap 投影时再打开
 		int  cmshPostOptIter      = 3;
 		int  cmshPostUntIter      = 3;
+
+		/// 把同一 cell（owner 相同）、同 patch、近共面的相邻 boundary face 合
+		/// 并成一个大 polygon face。对应 OpenFOAM mergePatchFaces 工具，主要
+		/// 用来还原 castellated 阶段被 sub-quad 切碎的 face（一个 face 切 4
+		/// 个 sub-quad → 同 owner 同 patch 同平面 → 可逆合）。
+		///
+		/// 触发条件（每对相邻 boundary face F1, F2）：
+		///   1) 同一 owner cell（boundary face 只有 owner，故必须同 owner）
+		///   2) 同一 patch（startFace/nFaces 区段内）
+		///   3) cos(angle) > mergePatchFacesCosTol （≈ 8 度阈值）
+		///   4) 共一条 edge（不允许 T-junction：恰好一对相邻顶点对）
+		/// 合并后做共线顶点折叠（三连点近共线 → 删除中点）。一直 greedy 跑
+		/// 到没有可合并 face 对为止。
+		bool         mergePatchFaces       = false;
+		XFoam_Scalar mergePatchFacesCosTol = static_cast<XFoam_Scalar>(0.99); ///< cos(~8deg)
+		int          mergePatchFacesMaxIter = 6;
 	};
 
 	/// 一个 refinementSurfaces.<name> 入口；resolveStl() 阶段调用方按 surface name

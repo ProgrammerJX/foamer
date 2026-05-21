@@ -30,6 +30,224 @@
 
 namespace
 {
+// ===== mergePatchFaces：把同 owner / 同 patch / 近共面的相邻 boundary face 合并 =====
+//
+// 输入：
+//   pts            : 全局点表
+//   facesOut       : 已按 polyMesh 顺序排好（先 internal 段，再各 patch）
+//   ownerOut       : 与 facesOut 同尺寸；boundary 段只含 owner（无 neighbour）
+//   patchStart/Size: boundary 段每个 patch 的起点 + face 数
+//   nInternalFaces : facesOut 中前缀的 internal face 数
+//   cosTol         : face 法向夹角余弦阈值（>= 此值才视为共面）
+//   maxIter        : greedy 合并轮数上限
+//
+// 输出（in-place 修改 facesOut / ownerOut / patchStart / patchSize）：
+//   被合并的次要 face 被打 dead 标，最后做一次紧致 + patch start/size 修正。
+//
+// 复杂度 ≈ O(N_b * deg)；deg 是每个 boundary face 的边数（一般 4）。
+struct MergePatchStats
+{
+	int nMerged = 0;
+	int nCollinearDropped = 0;
+};
+MergePatchStats mergePatchFacesInPlace(
+	const std::vector<XFoam_Vector3D>&        pts,
+	std::vector<std::vector<int>>&            facesOut,
+	std::vector<int>&                         ownerOut,
+	int                                       nInternalFaces,
+	std::vector<XFoam_Label>&                 patchStart,
+	std::vector<XFoam_Label>&                 patchSize,
+	double                                    cosTol,
+	int                                       maxIter)
+{
+	MergePatchStats st;
+	auto faceN = [&](const std::vector<int>& fv) -> XFoam_Vector3D {
+		const int n = static_cast<int>(fv.size());
+		if (n < 3) return XFoam_Vector3D(0, 0, 0);
+		const XFoam_Vector3D v0 = pts[fv[0]];
+		XFoam_Vector3D a(0, 0, 0);
+		for (int i = 1; i + 1 < n; ++i)
+		{
+			const XFoam_Vector3D e1 = pts[fv[i]] - v0;
+			const XFoam_Vector3D e2 = pts[fv[i + 1]] - v0;
+			a.x() += static_cast<XFoam_Scalar>(0.5) * (e1.y() * e2.z() - e1.z() * e2.y());
+			a.y() += static_cast<XFoam_Scalar>(0.5) * (e1.z() * e2.x() - e1.x() * e2.z());
+			a.z() += static_cast<XFoam_Scalar>(0.5) * (e1.x() * e2.y() - e1.y() * e2.x());
+		}
+		return a;
+	};
+	auto unitN = [&](const std::vector<int>& fv) -> XFoam_Vector3D {
+		XFoam_Vector3D a = faceN(fv);
+		const XFoam_Scalar m = a.mag();
+		if (m <= 0) return XFoam_Vector3D(0,0,0);
+		return XFoam_Vector3D(a.x()/m, a.y()/m, a.z()/m);
+	};
+	auto pairKey = [](int a, int b) -> long long {
+		const int lo = a < b ? a : b, hi = a < b ? b : a;
+		return (static_cast<long long>(static_cast<uint32_t>(lo)) << 32) |
+		        static_cast<long long>(static_cast<uint32_t>(hi));
+	};
+	// 把两个 face 沿 (u,v) 共享边拼接：在 F1 找 (u,v) 或 (v,u) 的位置 i（v 在 i+1）；
+	// 在 F2 找方向相反的同一对。合并：F1[0..i] + F2[绕过共享边的另一侧] + F1[i+1..]。
+	auto mergeAlongEdge = [&](const std::vector<int>& F1,
+	                          const std::vector<int>& F2,
+	                          int u, int v) -> std::vector<int>
+	{
+		auto findEdge = [&](const std::vector<int>& F, int a, int b) -> int {
+			const int n = static_cast<int>(F.size());
+			for (int i = 0; i < n; ++i) if (F[i] == a && F[(i + 1) % n] == b) return i;
+			return -1;
+		};
+		int i1 = findEdge(F1, u, v);
+		int dir2; int i2;
+		if (i1 >= 0) { i2 = findEdge(F2, v, u); dir2 = 0; }
+		else
+		{
+			i1 = findEdge(F1, v, u);
+			if (i1 < 0) return std::vector<int>();
+			i2 = findEdge(F2, u, v);
+			dir2 = 1;
+		}
+		if (i2 < 0) return std::vector<int>();
+		std::vector<int> out;
+		const int n1 = static_cast<int>(F1.size());
+		const int n2 = static_cast<int>(F2.size());
+		out.reserve(n1 + n2 - 2);
+		// 取 F1[0..i1]（含 i1）
+		for (int k = 0; k <= i1; ++k) out.push_back(F1[k]);
+		// 取 F2 跳过共享边那两点：从 (i2+2) 走 n2-2 步
+		for (int s = 0; s < n2 - 2; ++s)
+		{
+			const int idx = (i2 + 2 + s) % n2;
+			out.push_back(F2[idx]);
+		}
+		(void)dir2;
+		// 取 F1[i1+2..n1-1]
+		for (int k = i1 + 2; k < n1; ++k) out.push_back(F1[k]);
+		return out;
+	};
+	auto dropCollinear = [&](std::vector<int>& F, int& dropped) {
+		bool changed = true;
+		while (changed && F.size() > 3)
+		{
+			changed = false;
+			const int n = static_cast<int>(F.size());
+			for (int i = 0; i < n && F.size() > 3; ++i)
+			{
+				const int p = F[(i + n - 1) % n];
+				const int q = F[i];
+				const int r = F[(i + 1) % n];
+				if (p == r) { F.erase(F.begin() + i); ++dropped; changed = true; break; }
+				const XFoam_Vector3D e1 = pts[q] - pts[p];
+				const XFoam_Vector3D e2 = pts[r] - pts[q];
+				const XFoam_Scalar m1 = e1.mag();
+				const XFoam_Scalar m2 = e2.mag();
+				if (m1 <= 0 || m2 <= 0) continue;
+				XFoam_Vector3D c(
+					e1.y()*e2.z() - e1.z()*e2.y(),
+					e1.z()*e2.x() - e1.x()*e2.z(),
+					e1.x()*e2.y() - e1.y()*e2.x());
+				const XFoam_Scalar sineLike = c.mag() / (m1 * m2);
+				// sin < 1e-6 → near collinear
+				if (sineLike < static_cast<XFoam_Scalar>(1e-6))
+				{
+					F.erase(F.begin() + i);
+					++dropped;
+					changed = true;
+					break;
+				}
+			}
+		}
+	};
+	std::vector<char> dead(facesOut.size(), 0);
+	for (int it = 0; it < maxIter; ++it)
+	{
+		int mergedThisRound = 0;
+		for (std::size_t pi = 0; pi < patchStart.size(); ++pi)
+		{
+			const int s = static_cast<int>(patchStart[pi]);
+			const int e = s + static_cast<int>(patchSize[pi]);
+			// edge → face id 列表（只装在 patch 范围内 + 没被 dead 的 face）
+			std::unordered_map<long long, std::vector<int>> em;
+			em.reserve(static_cast<std::size_t>(e - s) * 4);
+			for (int fi = s; fi < e; ++fi)
+			{
+				if (dead[fi]) continue;
+				const auto& fv = facesOut[fi];
+				const int n = static_cast<int>(fv.size());
+				for (int i = 0; i < n; ++i)
+				{
+					const long long k = pairKey(fv[i], fv[(i + 1) % n]);
+					em[k].push_back(fi);
+				}
+			}
+			for (auto& kv : em)
+			{
+				if (kv.second.size() != 2) continue;
+				int f1 = kv.second[0], f2 = kv.second[1];
+				if (dead[f1] || dead[f2]) continue;
+				if (ownerOut[f1] != ownerOut[f2]) continue;  // 同一 cell 才能合
+				const XFoam_Vector3D n1 = unitN(facesOut[f1]);
+				const XFoam_Vector3D n2 = unitN(facesOut[f2]);
+				const XFoam_Scalar d = n1.x()*n2.x() + n1.y()*n2.y() + n1.z()*n2.z();
+				if (static_cast<double>(d) < cosTol) continue;
+				// 共享边的端点（从 key 拆回）
+				const int a = static_cast<int>(kv.first >> 32);
+				const int b = static_cast<int>(kv.first & 0xFFFFFFFFLL);
+				// 确保 patch 内确实只 2 face 共此边，否则可能是 T-junction（被 split
+				// face 切出的中点会出现在多个 face 的 edge 列表里，导致 deg=3+）。
+				// 此处 em 已校验 == 2，但 dropped 处理后可能复杂 — 直接走合并。
+				std::vector<int> merged = mergeAlongEdge(facesOut[f1], facesOut[f2], a, b);
+				if (merged.size() < 3) continue;
+				int dropped = 0;
+				dropCollinear(merged, dropped);
+				st.nCollinearDropped += dropped;
+				if (merged.size() < 3) continue;
+				facesOut[f1] = std::move(merged);
+				dead[f2] = 1;
+				++mergedThisRound;
+				++st.nMerged;
+			}
+		}
+		if (mergedThisRound == 0) break;
+	}
+	// 紧致 facesOut / ownerOut：internal 段（< nInternalFaces）保持原序，
+	// boundary 段按 patch 顺序排剔除 dead 后的 face。
+	if (st.nMerged > 0)
+	{
+		std::vector<std::vector<int>> newFaces;
+		std::vector<int>              newOwner;
+		newFaces.reserve(facesOut.size() - static_cast<std::size_t>(st.nMerged));
+		newOwner.reserve(facesOut.size() - static_cast<std::size_t>(st.nMerged));
+		// internal 段
+		for (int fi = 0; fi < nInternalFaces; ++fi)
+		{
+			newFaces.push_back(std::move(facesOut[fi]));
+			newOwner.push_back(ownerOut[fi]);
+		}
+		// boundary 段重新拼，按 patch 顺序更新 patchStart/patchSize
+		for (std::size_t pi = 0; pi < patchStart.size(); ++pi)
+		{
+			const int s = static_cast<int>(patchStart[pi]);
+			const int e = s + static_cast<int>(patchSize[pi]);
+			const int newStart = static_cast<int>(newFaces.size());
+			int newCount = 0;
+			for (int fi = s; fi < e; ++fi)
+			{
+				if (dead[fi]) continue;
+				newFaces.push_back(std::move(facesOut[fi]));
+				newOwner.push_back(ownerOut[fi]);
+				++newCount;
+			}
+			patchStart[pi] = static_cast<XFoam_Label>(newStart);
+			patchSize[pi]  = static_cast<XFoam_Label>(newCount);
+		}
+		facesOut.swap(newFaces);
+		ownerOut.swap(newOwner);
+	}
+	return st;
+}
+
 // ===== snap polyMesh ↔ XFoam_CMshPolyMeshGen 双向桥（in-memory，无文件 I/O）=====
 // snap 的内部 mesh 形如：
 //   pts: std::vector<XFoam_Vector3D>
@@ -345,6 +563,9 @@ void XFoam_SnappyHexMesh::readPhaseFlags(const XFoam_Dictionary& dict)
 	(void)dict.readIfPresent(XFoam_Word("cmshPostMapper"),      phases_.cmshPostMapper);
 	(void)dict.readIfPresent(XFoam_Word("cmshPostOptIter"),     phases_.cmshPostOptIter);
 	(void)dict.readIfPresent(XFoam_Word("cmshPostUntIter"),     phases_.cmshPostUntIter);
+	(void)dict.readIfPresent(XFoam_Word("mergePatchFaces"),     phases_.mergePatchFaces);
+	(void)dict.readIfPresent(XFoam_Word("mergePatchFacesCosTol"), phases_.mergePatchFacesCosTol);
+	(void)dict.readIfPresent(XFoam_Word("mergePatchFacesMaxIter"), phases_.mergePatchFacesMaxIter);
 }
 
 void XFoam_SnappyHexMesh::tuneForFeatures(
@@ -2722,6 +2943,29 @@ bool XFoam_SnappyHexMesh::run(
 		stats.nPoints = static_cast<XFoam_Label>(pts.size());
 		stats.nFaces  = static_cast<XFoam_Label>(facesOut.size());
 		stats.nInternalFaces = static_cast<XFoam_Label>(nbrOut.size());
+		stats.nBoundaryFaces = stats.nFaces - stats.nInternalFaces;
+	}
+
+	// ----- 9.9. mergePatchFaces：合并同 owner / 同 patch / 共面相邻 boundary face -----
+	// snappy castellated 阶段相邻 level 不同的 hex 会把 face 切 4 个 sub-quad；
+	// 这里就是把这些"逆切"回去（前提是它们与原 face 同 owner + 同 patch +
+	// 同平面）。
+	if (phases_.mergePatchFaces && !patchStartOut.empty())
+	{
+		const MergePatchStats ms = mergePatchFacesInPlace(
+			pts, facesOut, ownerOut,
+			static_cast<int>(stats.nInternalFaces),
+			patchStartOut, patchSizeOut,
+			static_cast<double>(phases_.mergePatchFacesCosTol),
+			phases_.mergePatchFacesMaxIter);
+		if (ms.nMerged > 0)
+		{
+			std::cout << "  mergePatchFaces: merged=" << ms.nMerged
+			          << " collinearVtxDropped=" << ms.nCollinearDropped
+			          << " bndFacesBefore=" << stats.nBoundaryFaces
+			          << " bndFacesAfter=" << (facesOut.size() - nbrOut.size()) << "\n";
+		}
+		stats.nFaces  = static_cast<XFoam_Label>(facesOut.size());
 		stats.nBoundaryFaces = stats.nFaces - stats.nInternalFaces;
 	}
 
