@@ -93,6 +93,43 @@ public:
 		XFoam_Label maxLevel = 0;
 	};
 
+	/// castellatedMeshControls.refinementRegions.<surfName> { mode distance|inside|outside;
+	///   levels ((d1 lv1) (d2 lv2) ...); }
+	///
+	/// 语义对齐 OpenFOAM：
+	///   * mode = distance：leaf 中心到该 surface 的"无符号"距离 ≤ d_i 时
+	///     升 level 到 lv_i。多 band 取最严苛（同 cell 命中多个 band，取
+	///     符合的最高 lv，且 d 单调递增）。
+	///   * mode = inside：surface 内部所有 cell（contains==true）→ 取 levels
+	///     第一个 lv（其它 band 忽略；OF inside 习惯单 level）。
+	///   * mode = outside：surface 外部所有 cell → 取首 lv。
+	/// surface 由 name 反查 surfaces_（与 refinementSurfaces 同名），其 brep
+	/// 从 run(stls,...) 的同序数组里取。MVP：surface 与 refinementSurfaces
+	/// 同名时复用同一个 brep，不另读 geometry。
+	struct RegionRefineSpec
+	{
+		enum class Mode { kDistance, kInside, kOutside };
+		XFoam_Word                                   name;
+		Mode                                         mode = Mode::kDistance;
+		std::vector<std::pair<XFoam_Scalar, XFoam_Label>> levels; ///< 按 d 升序
+	};
+
+	/// castellatedMeshControls.features ( { file "x.eMesh"; level N; }
+	///                                    { surface <name>; level N; } );
+	///
+	/// MVP 只实现 surface-source 形式：把命名 surface 的 brep feature edge
+	/// 作为 distance source，在 d ≤ 0.5 * baseCell 范围内升 level 到 N。
+	/// 真正 OpenFOAM eMesh 格式（binary edge mesh）暂不解析；file 字段保留
+	/// 作占位（解析时记下来，运行期忽略 + 警告）。这与 cmsh.localFeatureRefine
+	/// 思路对齐。
+	struct FeatureRefineSpec
+	{
+		XFoam_Word     surfaceName;   ///< 优先：匹配 refinementSurfaces.<name>
+		XFoam_FileName file;          ///< OF eMesh 路径（占位，MVP 不读）
+		XFoam_Label    level     = 0; ///< 命中 feature 邻域时的目标 level
+		XFoam_Scalar   distance  = 0; ///< 邻域半径；≤0 → 用 baseCellSize * 0.5
+	};
+
 	struct Stats
 	{
 		XFoam_Label nBgCells = 0;          // 背景 blockMesh 的 cell 数（单 block 时即 nx*ny*nz）
@@ -149,6 +186,8 @@ public:
 	const PhaseFlags& phases() const noexcept { return phases_; }
 
 	const std::vector<SurfaceSpec>& surfaces() const noexcept { return surfaces_; }
+	const std::vector<RegionRefineSpec>&  refinementRegions() const noexcept { return regions_; }
+	const std::vector<FeatureRefineSpec>& featuresList()      const noexcept { return features_; }
 
 	/// 全局最高 level（所有 surface 的 maxLevel 的 max）；buffer 后 oct 真实达到的 level
 	/// 在 Stats::maxAdaptiveLevel。
@@ -201,10 +240,14 @@ private:
 	PhaseFlags phases_;
 
 	mutable std::vector<SurfaceSpec> surfaces_;
+	std::vector<RegionRefineSpec>    regions_;
+	std::vector<FeatureRefineSpec>   features_;
 	mutable bool tunedForFeatures_ = false; ///< tuneForFeatures 已跑过
 
 	void readPhaseFlags(const XFoam_Dictionary& snappyDict);
 	void readRefinementSurfaces(const XFoam_Dictionary& snappyDict);
+	void readRefinementRegions(const XFoam_Dictionary& snappyDict);
+	void readFeaturesList(const XFoam_Dictionary& snappyDict);
 	void readGeometry(const XFoam_Dictionary& snappyDict);
 
 	/// 当 phases_.fitFeatures=true 时，在 run() 开头按 brep 反报的最小 feature

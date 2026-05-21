@@ -296,6 +296,8 @@ XFoam_SnappyHexMesh::XFoam_SnappyHexMesh(const XFoam_Dictionary& dict)
 	}
 	readPhaseFlags(dict);
 	readRefinementSurfaces(dict);
+	readRefinementRegions(dict);
+	readFeaturesList(dict);
 	readGeometry(dict);
 }
 
@@ -512,6 +514,150 @@ void XFoam_SnappyHexMesh::readRefinementSurfaces(const XFoam_Dictionary& dict)
 			}
 		}
 		surfaces_.push_back(spec);
+	}
+}
+
+void XFoam_SnappyHexMesh::readRefinementRegions(const XFoam_Dictionary& dict)
+{
+	// castellatedMeshControls.refinementRegions.<surfName>
+	//   { mode distance|inside|outside; levels ((d1 lv1) (d2 lv2)...); }
+	// 解析失败 / mode 缺失时给一条 warning 然后跳过。
+	regions_.clear();
+	DictView cv = asDict(dict, XFoam_Word("castellatedMeshControls"));
+	if (!cv.dict) return;
+	DictView rv = asDict(*cv.dict, XFoam_Word("refinementRegions"));
+	if (!rv.dict) return;
+	const XFoam_WordList keys = rv.dict->toc();
+	for (XFoam_Label i = 0; i < keys.size(); ++i)
+	{
+		RegionRefineSpec spec;
+		spec.name = keys[i];
+		DictView pv = asDict(*rv.dict, spec.name);
+		const XFoam_Dictionary* sd = pv.dict;
+		if (!sd) continue;
+		XFoam_Word mode("distance");
+		(void)sd->readIfPresent(XFoam_Word("mode"), mode);
+		const std::string ms = static_cast<const std::string&>(static_cast<const XFoam_String&>(mode));
+		if      (ms == "distance") spec.mode = RegionRefineSpec::Mode::kDistance;
+		else if (ms == "inside")   spec.mode = RegionRefineSpec::Mode::kInside;
+		else if (ms == "outside")  spec.mode = RegionRefineSpec::Mode::kOutside;
+		else
+		{
+			std::cerr << "snappy: refinementRegions[" << ms << "] unknown mode '"
+			          << ms << "' (use distance|inside|outside), skipped.\n";
+			continue;
+		}
+		const XFoam_Entry* le = sd->lookupEntryPtr(XFoam_Word("levels"), false, false);
+		if (le)
+		{
+			XFoam_ITstream& is = le->stream();
+			is.rewind();
+			XFoam_Token t;
+			is >> t;
+			// 外层 ( ... )
+			if (t.isPunctuation() && t.pToken() == XFoam_Token::BEGIN_LIST)
+			{
+				while (true)
+				{
+					is >> t;
+					if (t.isPunctuation() && t.pToken() == XFoam_Token::END_LIST) break;
+					// 内层 (d lv)
+					if (t.isPunctuation() && t.pToken() == XFoam_Token::BEGIN_LIST)
+					{
+						double d  = 0.0;
+						int32_t lv = 0;
+						is >> d >> lv;
+						// 吃掉 END_LIST
+						is >> t;
+						spec.levels.emplace_back(static_cast<XFoam_Scalar>(d),
+						                         static_cast<XFoam_Label>(lv));
+					}
+					else
+					{
+						// 容错：扁平 d lv d lv ...
+						break;
+					}
+				}
+			}
+		}
+		// 按 distance 升序排稳定，distance 模式查 band 时早出
+		std::sort(spec.levels.begin(), spec.levels.end(),
+			[](const std::pair<XFoam_Scalar, XFoam_Label>& a,
+			   const std::pair<XFoam_Scalar, XFoam_Label>& b) { return a.first < b.first; });
+		regions_.push_back(std::move(spec));
+	}
+}
+
+void XFoam_SnappyHexMesh::readFeaturesList(const XFoam_Dictionary& dict)
+{
+	// castellatedMeshControls.features ( { surface <name>; level N; distance D; }
+	//                                    { file "x.eMesh"; level N; } );
+	// 仅 surface= 形式真正生效；file= 形式记下来但运行期不解析（MVP）。
+	features_.clear();
+	DictView cv = asDict(dict, XFoam_Word("castellatedMeshControls"));
+	if (!cv.dict) return;
+	const XFoam_Entry* fe = cv.dict->lookupEntryPtr(XFoam_Word("features"), false, false);
+	if (!fe) return;
+	XFoam_ITstream& is = fe->stream();
+	is.rewind();
+	XFoam_Token t;
+	is >> t;
+	if (!(t.isPunctuation() && t.pToken() == XFoam_Token::BEGIN_LIST)) return;
+	while (true)
+	{
+		is >> t;
+		if (t.isPunctuation() && t.pToken() == XFoam_Token::END_LIST) break;
+		if (!(t.isPunctuation() && t.pToken() == XFoam_Token::BEGIN_BLOCK)) continue;
+		FeatureRefineSpec spec;
+		// 读 sub-dict 里直到 END_BLOCK 的 key value;
+		while (true)
+		{
+			XFoam_Token k;
+			is >> k;
+			if (k.isPunctuation() && k.pToken() == XFoam_Token::END_BLOCK) break;
+			if (!k.isWord()) continue;
+			const XFoam_Word keyword = k.wordToken();
+			const std::string ks = static_cast<const std::string&>(
+				static_cast<const XFoam_String&>(keyword));
+			XFoam_Token v;
+			is >> v;
+			if (ks == "surface" && v.isWord())
+			{
+				spec.surfaceName = v.wordToken();
+			}
+			else if (ks == "file" && v.isString())
+			{
+				spec.file = XFoam_FileName(v.stringToken());
+			}
+			else if (ks == "level" && (v.isLabel() || v.isScalar()))
+			{
+				spec.level = static_cast<XFoam_Label>(
+					v.isLabel() ? v.labelToken() : static_cast<int32_t>(v.scalarToken()));
+			}
+			else if (ks == "distance" && v.isScalar())
+			{
+				spec.distance = static_cast<XFoam_Scalar>(v.scalarToken());
+			}
+			// 吃 ';' 分隔符
+			XFoam_Token semi;
+			is >> semi;
+			if (!(semi.isPunctuation() && semi.pToken() == XFoam_Token::END_STATEMENT))
+			{
+				// 没分号也容错往下
+			}
+		}
+		const std::string sn = static_cast<const std::string&>(
+			static_cast<const XFoam_String&>(spec.surfaceName));
+		if (sn.empty() && spec.file.empty()) continue;
+		if (sn.empty())
+		{
+			std::cerr << "snappy: features { file ... } 未实现 eMesh 解析，"
+			          << "请改写为 { surface <name>; level N; }；跳过 "
+			          << static_cast<const std::string&>(
+			                 static_cast<const XFoam_String&>(spec.file)) << "\n";
+			continue;
+		}
+		features_.push_back(std::move(spec));
 	}
 }
 
@@ -919,6 +1065,87 @@ bool XFoam_SnappyHexMesh::run(
 
 	const int nBufferLayers = std::max(0, static_cast<int>(refine_.nCellsBetweenLevels) - 1);
 
+	// ----- 2.r 解析 refinementRegions / features：把 spec 关联到对应的 brep -----
+	// 都按 surfaces_[si].name 对齐到 stls[si]。Region/Feature 找不到名字时给
+	// warning + 跳过。各结构是只读 view，不做拷贝。
+	struct RegionRT
+	{
+		const RegionRefineSpec* spec  = nullptr;
+		const XFoam_BrepBase*   brep  = nullptr;
+		XFoam_Label             maxLv = 0; ///< 该 region 涉及的最高 level（hint）
+	};
+	std::vector<RegionRT> regionRT;
+	regionRT.reserve(regions_.size());
+	for (const auto& rs : regions_)
+	{
+		RegionRT rt;
+		rt.spec = &rs;
+		for (XFoam_Label si = 0; si < nSurf; ++si)
+		{
+			if (surfaces_[si].name == rs.name && stls[si] && !stls[si]->empty())
+			{
+				rt.brep = stls[si];
+				break;
+			}
+		}
+		if (!rt.brep)
+		{
+			std::cerr << "snappy: refinementRegions[" 
+				<< static_cast<const std::string&>(static_cast<const XFoam_String&>(rs.name))
+				<< "] no matching geometry / brep, skipped.\n";
+			continue;
+		}
+		for (const auto& lv : rs.levels) rt.maxLv = std::max(rt.maxLv, lv.second);
+		regionRT.push_back(rt);
+	}
+
+	struct FeatureRT
+	{
+		const FeatureRefineSpec* spec  = nullptr;
+		const XFoam_BrepBase*    brep  = nullptr;
+		XFoam_Scalar             dist  = 0;
+	};
+	std::vector<FeatureRT> featureRT;
+	featureRT.reserve(features_.size());
+	for (const auto& fs : features_)
+	{
+		FeatureRT rt;
+		rt.spec = &fs;
+		for (XFoam_Label si = 0; si < nSurf; ++si)
+		{
+			if (surfaces_[si].name == fs.surfaceName && stls[si] && !stls[si]->empty())
+			{
+				rt.brep = stls[si];
+				break;
+			}
+		}
+		if (!rt.brep)
+		{
+			std::cerr << "snappy: features { surface "
+				<< static_cast<const std::string&>(static_cast<const XFoam_String&>(fs.surfaceName))
+				<< " } 找不到对应 brep，跳过。\n";
+			continue;
+		}
+		if (rt.brep->nFeatureEdges() == 0)
+		{
+			std::cerr << "snappy: features { surface "
+				<< static_cast<const std::string&>(static_cast<const XFoam_String&>(fs.surfaceName))
+				<< " } brep.nFeatureEdges()==0 (是否调过 buildFeatures?)；跳过。\n";
+			continue;
+		}
+		rt.dist = fs.distance;  // 0 → run-time 用 leaf 自适应（baseCellSize * 0.5）
+		featureRT.push_back(rt);
+	}
+
+	// 把 refinementRegions / features 的最大 level 汇入 targetLevel：
+	// refineByPredicate 用同一个 cap 控所有路径，不抬高 cap 会让 region 拉的更高
+	// level 被截断。
+	XFoam_Label regionTargetLevel = static_cast<XFoam_Label>(targetLevel);
+	for (const auto& rt : regionRT) regionTargetLevel = std::max(regionTargetLevel, rt.maxLv);
+	for (const auto& rt : featureRT)
+		regionTargetLevel = std::max(regionTargetLevel,
+			static_cast<XFoam_Label>(rt.spec->level));
+
 	// ----- 2.x 每 block 走完 refine → buffer → balance → cull → assignCellIds -----
 	stats.nRefinedCells = 0;
 	stats.nKeptCells = 0;
@@ -930,14 +1157,63 @@ bool XFoam_SnappyHexMesh::run(
 		XFoam_Hex8Ref& oct = octs[static_cast<size_t>(bi)];
 
 		oct.refineByPredicate(
-			static_cast<XFoam_Label>(targetLevel),
+			regionTargetLevel,
 			[&](const Leaf& l) -> bool {
 				const XFoam_BoundBox bb = leafBBoxB(B, l);
+				// (a) 经典 surface-touch refine
 				for (XFoam_Label si = 0; si < nSurf; ++si)
 				{
 					if (!stls[si] || stls[si]->empty()) continue;
 					if (l.level >= surfMaxLevel[si]) continue;
 					if (stls[si]->boxIntersects(bb)) return true;
+				}
+				// (b) refinementRegions
+				if (!regionRT.empty())
+				{
+					const XFoam_Vector3D c = leafCentroidWorldB(B, l);
+					for (const auto& rt : regionRT)
+					{
+						if (l.level >= rt.maxLv) continue;
+						const auto& sp = *rt.spec;
+						if (sp.mode == RegionRefineSpec::Mode::kInside)
+						{
+							if (!sp.levels.empty() && rt.brep->contains(c) &&
+								l.level < sp.levels.front().second) return true;
+						}
+						else if (sp.mode == RegionRefineSpec::Mode::kOutside)
+						{
+							if (!sp.levels.empty() && !rt.brep->contains(c) &&
+								l.level < sp.levels.front().second) return true;
+						}
+						else // distance
+						{
+							const XFoam_Scalar d = rt.brep->distance(c);
+							XFoam_Label wantLv = 0;
+							// 距离升序的 (d_i, lv_i)：取最严苛 lv（d ≤ d_i 命中）
+							for (const auto& band : sp.levels)
+								if (d <= band.first) { wantLv = std::max(wantLv, band.second); }
+							if (l.level < wantLv) return true;
+						}
+					}
+				}
+				// (c) features：cell 中心半径 d 内有 feature edge / vertex → refine
+				if (!featureRT.empty())
+				{
+					const XFoam_Vector3D c = leafCentroidWorldB(B, l);
+					// leaf 自身尺度（参数 0..1 → world (B 边长 / Nx*2^L)）
+					const XFoam_Scalar lx = (B.corner[1].x() - B.corner[0].x()) /
+						(static_cast<XFoam_Scalar>(B.Nx) *
+						 static_cast<XFoam_Scalar>(1LL << l.level));
+					for (const auto& rt : featureRT)
+					{
+						const XFoam_Label wantLv = rt.spec->level;
+						if (l.level >= wantLv) continue;
+						XFoam_Scalar sr = rt.dist;
+						if (sr <= 0) sr = lx * static_cast<XFoam_Scalar>(0.5);
+						XFoam_Vector3D fp, ft;
+						const auto fk = rt.brep->closestFeature(c, sr, fp, ft);
+						if (fk != XFoam_BrepBase::FeatureKind::None) return true;
+					}
 				}
 				return false;
 			});
