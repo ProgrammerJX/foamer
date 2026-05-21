@@ -175,6 +175,19 @@ public:
 		return XFoam_BoundBox(); // invalid
 	}
 
+	/// 单个 sub-patch 的最短 feature 边长（比 minFeatureLength 更精细，按
+	/// 每张 TpFace 自己的边算）。返回 0 表示 "未知 / 不支持 / 没有 feature"。
+	///   * MBrep：扫该 face 的 outerLoop + innerLoops，取最短 ParametricEdge
+	///     的 sampled 多段线总长。
+	///   * VBrep：扫该 patchId 下所有三角面，取最短三角边（粗估，不区分
+	///     feature/internal）。
+	/// 用途：creator 的 per-face fitFeatures 取 min(bbox_min_side, this)
+	/// 作为 cellSize 目标，既保 bbox 完整又保 feature 不被网格抹平。
+	virtual XFoam_Scalar subPatchMinFeatureLength(XFoam_Label /*id*/) const
+	{
+		return 0;
+	}
+
 	/// 最小 feature 尺度（mm 等线性单位）。返回的语义：
 	///   * VBrep：featureEdges_ 中最短的一段（一条 DiscreteEdge）长度。
 	///   * MBrep：featureEdgeIdx_ 对应 ParametricEdge 的 sampled 多段线总长

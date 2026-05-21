@@ -144,6 +144,7 @@ public:
 	XFoam_String subPatchName(XFoam_Label id) const override;
 	XFoam_Label closestSubPatchId(const XFoam_Vector3D& p) const override;
 	XFoam_BoundBox subPatchBounds(XFoam_Label id) const override;
+	XFoam_Scalar subPatchMinFeatureLength(XFoam_Label id) const override;
 
 	/// 最短 feature edge 段（DiscreteEdge）长度。先 ensureAcceleration() 确保
 	/// featureEdges_ 被填好；buildFeatures 未调用过时返回 0。

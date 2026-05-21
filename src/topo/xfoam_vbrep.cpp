@@ -1320,6 +1320,26 @@ XFoam_Label XFoam_VBrep::closestSubPatchId(const XFoam_Vector3D& p) const
 	return faces_[bestTri].patchId;
 }
 
+XFoam_Scalar XFoam_VBrep::subPatchMinFeatureLength(XFoam_Label id) const
+{
+	XFoam_Scalar best = std::numeric_limits<XFoam_Scalar>::infinity();
+	for (XFoam_Label fi = 0; fi < faces_.size(); ++fi)
+	{
+		if (faces_[fi].patchId != id) continue;
+		for (int k = 0; k < 3; ++k)
+		{
+			const XFoam_Label v0 = faces_[fi].verts[k];
+			const XFoam_Label v1 = faces_[fi].verts[(k + 1) % 3];
+			if (v0 < 0 || v1 < 0
+			    || v0 >= positions_.size() || v1 >= positions_.size())
+				continue;
+			const XFoam_Scalar L = (positions_[v1] - positions_[v0]).mag();
+			if (L > 0 && L < best) best = L;
+		}
+	}
+	return std::isfinite(best) ? best : 0;
+}
+
 XFoam_BoundBox XFoam_VBrep::subPatchBounds(XFoam_Label id) const
 {
 	// 扫所有 face：若 face.patchId == id，把其 3 个顶点的 bbox union 进去。

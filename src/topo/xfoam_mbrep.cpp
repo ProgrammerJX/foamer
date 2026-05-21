@@ -798,6 +798,31 @@ XFoam_BoundBox XFoam_MBrep::subPatchBounds(XFoam_Label id) const
 	return XFoam_BoundBox();
 }
 
+XFoam_Scalar XFoam_MBrep::subPatchMinFeatureLength(XFoam_Label id) const
+{
+	if (id < 0 || id >= faces_.size()) return 0;
+	const auto& f = faces_[id];
+	XFoam_Scalar best = std::numeric_limits<XFoam_Scalar>::infinity();
+	auto scanLoop = [&](const XFoam_LabelList& loop) {
+		for (XFoam_Label i = 0; i < loop.size(); ++i)
+		{
+			const XFoam_Label ei = loop[i];
+			if (ei < 0 || ei >= edges_.size()) continue;
+			const auto& e = edges_[ei];
+			if (e.sampled.size() < 2) continue;
+			XFoam_Scalar L = 0;
+			for (std::size_t k = 1; k < e.sampled.size(); ++k)
+			{
+				L += (e.sampled[k] - e.sampled[k - 1]).mag();
+			}
+			if (L > 0 && L < best) best = L;
+		}
+	};
+	scanLoop(f.outerLoop);
+	for (const auto& il : f.innerLoops) scanLoop(il);
+	return std::isfinite(best) ? best : 0;
+}
+
 bool XFoam_MBrep::contains(const XFoam_Vector3D& p) const
 {
 	// 委托给内置 VBrep 代理（BVH ray-cast 计数法）。
