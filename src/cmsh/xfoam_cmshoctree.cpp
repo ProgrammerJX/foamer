@@ -423,6 +423,68 @@ void XFoam_CMshOctree::refineToSurfacePerFace(
 	}
 }
 
+void XFoam_CMshOctree::refineByProximityToFeatures(
+	XFoam_Scalar safety,
+	int          maxLevelCap,
+	XFoam_Scalar searchRadiusMul)
+{
+	if (maxLevelCap <= 0) return;
+	if (safety <= 0) safety = static_cast<XFoam_Scalar>(0.5);
+	if (searchRadiusMul <= 0) searchRadiusMul = static_cast<XFoam_Scalar>(2.0);
+
+	const XFoam_Vector3D rs = rootBox_.span();
+	const XFoam_Scalar   rsMax = std::max(rs.x(), std::max(rs.y(), rs.z()));
+	if (rsMax <= 0) return;
+
+	if (surface_.nFeatureEdges() == 0 && surface_.nFeatureVertices() == 0)
+	{
+		return;
+	}
+
+	bool progressed = true;
+	while (progressed)
+	{
+		progressed = false;
+		std::vector<XFoam_CMshOctreeCube*> snap = leaves_;
+		for (auto* leaf : snap)
+		{
+			if (!leaf || !leaf->isLeaf()) continue;
+			const int lv = static_cast<int>(leaf->level);
+			if (lv >= maxLevelCap) continue;
+			XFoam_Vector3D mn, mx;
+			leaf->cubeBox(rootBox_, mn, mx);
+			XFoam_BoundBox bb(mn, mx);
+			if (!surface_.boxIntersects(bb)) continue;
+
+			const XFoam_Vector3D c(
+				static_cast<XFoam_Scalar>(0.5) * (mn.x() + mx.x()),
+				static_cast<XFoam_Scalar>(0.5) * (mn.y() + mx.y()),
+				static_cast<XFoam_Scalar>(0.5) * (mn.z() + mx.z()));
+			const XFoam_Scalar leafSize = mx.x() - mn.x();
+			const XFoam_Scalar searchR  = leafSize * searchRadiusMul;
+
+			XFoam_Vector3D q, t;
+			const auto kind = surface_.closestFeature(c, searchR, q, t);
+			if (kind == XFoam_BrepBase::FeatureKind::None) continue;
+
+			const XFoam_Scalar dist = (q - c).mag();
+			const XFoam_Scalar wanted = std::max(
+				dist * safety,
+				static_cast<XFoam_Scalar>(1e-12));
+			const double ratio = static_cast<double>(rsMax)
+			                   / static_cast<double>(wanted);
+			if (ratio <= 1.0) continue;
+			int needed = static_cast<int>(std::ceil(std::log(ratio) / std::log(2.0)));
+			const int target = std::min(needed, maxLevelCap);
+			if (lv >= target) continue;
+
+			leaf->subdivide();
+			progressed = true;
+		}
+		if (progressed) rebuildLeaves();
+	}
+}
+
 void XFoam_CMshOctree::refineRegion(const XFoam_BoundBox& region, int targetLevel)
 {
 	if (targetLevel <= 0) return;

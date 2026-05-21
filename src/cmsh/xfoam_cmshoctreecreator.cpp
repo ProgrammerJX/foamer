@@ -198,6 +198,48 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 		}
 	}
 
+	// 4c) localFeatureRefine：真 · per-leaf 局部加密。靠近 TpEdge / TpVertex
+	//     的 leaf 自动 bump 到合适的 level，flat 远离 feature 的 leaf 保持
+	//     surfLevel 不动。对标 cfMesh::refineBasedOnProximityTests。
+	if (p_.localFeatureRefine && !surfsResolved.empty())
+	{
+		const auto& sr = surfsResolved.front();
+		const auto* bp = sr.brep;
+		if (bp && !bp->empty())
+		{
+			const XFoam_Label nFE = bp->nFeatureEdges();
+			const XFoam_Label nFV = bp->nFeatureVertices();
+			if (nFE + nFV == 0)
+			{
+				std::cout << "  localFeatureRefine: brep has no feature edges/vertices "
+				             "(call buildFeatures first); skipping\n";
+			}
+			else
+			{
+				const XFoam_Label nLeavesBefore = oct().nLeaves();
+				oct().refineByProximityToFeatures(
+					p_.localFeatureSafety,
+					p_.maxLevel,
+					p_.localFeatureSearchMul);
+				const XFoam_Label nLeavesAfter = oct().nLeaves();
+				std::vector<XFoam_Label> levelHist;
+				oct().countLeavesByLevel(levelHist);
+				std::cout << "  localFeatureRefine: leaves "
+				          << nLeavesBefore << " -> " << nLeavesAfter
+				          << " (safety=" << p_.localFeatureSafety
+				          << ", searchMul=" << p_.localFeatureSearchMul
+				          << ", cap=" << p_.maxLevel
+				          << "); leaf-level histogram: ";
+				for (std::size_t lv = 0; lv < levelHist.size(); ++lv)
+				{
+					if (levelHist[lv] == 0) continue;
+					std::cout << "L" << lv << "=" << levelHist[lv] << " ";
+				}
+				std::cout << "\n";
+			}
+		}
+	}
+
 	// 5) region refines
 	for (const auto& rr : regions_)
 	{

@@ -62,6 +62,13 @@ public:
 		bool         perFaceFitFeatures       = false;
 		XFoam_Scalar perFaceFitFeaturesSafety = static_cast<XFoam_Scalar>(0.5);
 
+		/// 真 · per-leaf 局部加密：只对靠近 TpEdge / TpVertex 的 leaf 加密，
+		/// flat 远离 feature 的 leaf 保持 surfLevel。perFace 只能给整张 face
+		/// 一个 level；这里能在单张大 face 的尖角附近 bump，平坦处不动。
+		bool         localFeatureRefine       = false;
+		XFoam_Scalar localFeatureSafety       = static_cast<XFoam_Scalar>(0.5);
+		XFoam_Scalar localFeatureSearchMul    = static_cast<XFoam_Scalar>(2.0);
+
 		/// coverAllFaces：自适应加密循环，对标 cfMesh::automaticRefinement 思路：
 		/// extract → 看哪些 TpFace 没被覆盖 → 对每个未覆盖 face 的 bbox 局部
 		/// refineRegion 到当前 leaf level+1 → 再 extract，直到全覆盖或顶到

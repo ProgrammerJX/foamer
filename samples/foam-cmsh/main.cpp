@@ -56,6 +56,9 @@ struct Args
 	int          fitFeatBump    = 2;
 	bool         perFaceFit     = false;
 	double       perFaceFitSafety = 0.5;
+	bool         localFeatRef   = false;
+	double       localFeatSafety = 0.5;
+	double       localFeatSearchMul = 2.0;
 	bool         coverAllFaces  = false;
 	int          coverRounds    = 3;
 	bool         pinFeatures    = false;
@@ -124,6 +127,9 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-fitFeatBump")   == 0) { if (!nexti(a.fitFeatBump))  return false; }
 		else if (std::strcmp(arg, "-perFaceFit")    == 0) { a.perFaceFit = true; }
 		else if (std::strcmp(arg, "-perFaceFitSafety") == 0) { if (!next(a.perFaceFitSafety)) return false; }
+		else if (std::strcmp(arg, "-localFeatRef")  == 0) { a.localFeatRef = true; }
+		else if (std::strcmp(arg, "-localFeatSafety") == 0) { if (!next(a.localFeatSafety)) return false; }
+		else if (std::strcmp(arg, "-localFeatSearchMul") == 0) { if (!next(a.localFeatSearchMul)) return false; }
 		else if (std::strcmp(arg, "-coverAllFaces") == 0) { a.coverAllFaces = true; }
 		else if (std::strcmp(arg, "-coverRounds")   == 0) { if (!nexti(a.coverRounds)) return false; }
 		else if (std::strcmp(arg, "-pinFeatures")   == 0) { a.pinFeatures = true; }
@@ -247,6 +253,9 @@ int main(int argc, char** argv)
 		pp.fitFeaturesMaxLevelBump   = A.fitFeatBump;
 		pp.perFaceFitFeatures        = A.perFaceFit;
 		pp.perFaceFitFeaturesSafety  = static_cast<XFoam_Scalar>(A.perFaceFitSafety);
+		pp.localFeatureRefine        = A.localFeatRef;
+		pp.localFeatureSafety        = static_cast<XFoam_Scalar>(A.localFeatSafety);
+		pp.localFeatureSearchMul     = static_cast<XFoam_Scalar>(A.localFeatSearchMul);
 		pp.coverAllFaces             = A.coverAllFaces;
 		pp.coverAllFacesMaxRounds    = A.coverRounds;
 		pp.enableFeaturePinner       = A.pinFeatures;

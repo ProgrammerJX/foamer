@@ -84,6 +84,17 @@ public:
 		bool         perFaceFitFeatures      = false;
 		XFoam_Scalar perFaceFitFeaturesSafety = static_cast<XFoam_Scalar>(0.5);
 
+		/// 真 · per-leaf 局部加密（cfMesh::refineBasedOnContainedCorners +
+		/// refineBasedOnContainedPartitions + refineBasedOnProximityTests
+		/// 的综合效果）：对每个 surface-touching leaf，查 closestFeature
+		/// (center, leaf.size * localFeatureSearchMul)；若返回 TpEdge / TpVertex
+		/// 距离 d，按 leaf.size ≈ d * safety 反推 target level。flat 远离
+		/// feature 的 leaf 保持 surfLevel 不动；靠近 feature 的 leaf 自动 bump
+		/// 到能解析 feature 的高 level。不全局炸 leaf。
+		bool         localFeatureRefine        = false;
+		XFoam_Scalar localFeatureSafety        = static_cast<XFoam_Scalar>(0.5);
+		XFoam_Scalar localFeatureSearchMul     = static_cast<XFoam_Scalar>(2.0);
+
 		/// 覆盖率兜底：在 fitFeatures / perFaceFitFeatures 跑完之后，仍存在
 		/// "无任何 leaf 的 closestSubPatchId 命中"的 TpFace 时，对那些 face 的
 		/// bbox 进一步局部加密一级一级往上叠，直到每张 face 都有 leaf 命中或

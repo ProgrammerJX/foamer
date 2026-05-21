@@ -158,6 +158,25 @@ public:
 	/// 把所有"box 与 region overlaps"的 leaf 加密到 targetLevel。
 	void refineRegion(const XFoam_BoundBox& region, int targetLevel);
 
+	/// per-leaf 局部加密（对标 cfMesh::meshOctreeAutomaticRefinement 的
+	/// refineBasedOnContainedCorners + refineBasedOnContainedPartitions +
+	/// refineBasedOnProximityTests 合并效果）：
+	///   * 对每个 surface-touching leaf c
+	///   * 查 surface_.closestFeature(c.centre, c.size * searchRadiusMul, q, t)
+	///   * 若返回 Edge / Vertex（TpEdge / TpVertex 在 search 范围内）
+	///     - d  = |c.centre - q|（局部 feature 距离）
+	///     - target = ceil(log2(rootSpan / (d * safety)))
+	///     - 若 leaf.level < min(target, maxLevelCap) → 该 leaf subdivide
+	///   * 反之 (None / Surface only) → 不动
+	///   * 迭代直到不再 progress
+	///
+	/// 用途：让靠近 TpVertex / TpEdge 的 leaf 自动 bump 到高 level，远离
+	/// feature 的 flat 部分保持 surfLevel，不全局炸 leaf。
+	void refineByProximityToFeatures(
+		XFoam_Scalar safety,
+		int          maxLevelCap,
+		XFoam_Scalar searchRadiusMul = static_cast<XFoam_Scalar>(2.0));
+
 	/// 返回与给定 bbox 相交的所有 leaf 的最大 level。无相交 leaf 时返回 -1。
 	/// 用于 coverAllSubPatches 兜底循环：决定下一轮 refine 该到哪一级。
 	int maxLeafLevelInBBox(const XFoam_BoundBox& region) const;
