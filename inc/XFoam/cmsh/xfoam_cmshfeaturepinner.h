@@ -28,6 +28,7 @@
 #include <vector>
 
 class XFoam_BrepBase;
+class XFoam_CMshSurfaceEngine;
 
 class XFoam_API XFoam_CMshFeaturePinner
 {
@@ -58,6 +59,13 @@ public:
 		const XFoam_BrepBase&  brep,
 		const Params&          p);
 
+	/// 复用外部 SurfaceEngine：跳过对 pm.faces 的 boundary point 扫描。
+	XFoam_CMshFeaturePinner(
+		XFoam_CMshPolyMeshGen&         pm,
+		const XFoam_BrepBase&          brep,
+		const Params&                  p,
+		const XFoam_CMshSurfaceEngine& se);
+
 	/// 跑一遍 pin pass，返回 stats。
 	Stats pin();
 
@@ -70,6 +78,8 @@ private:
 	const XFoam_BrepBase&  brep_;
 	Params                 p_;
 	std::vector<int>       pinnedPoints_;
+	std::vector<int>       bndPointsCache_; ///< 来自 SE 或 lazy 计算
+	bool                   haveBndCache_ = false;
 };
 
 #endif // XFoam_CMshFeaturePinner_H_

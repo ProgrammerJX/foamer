@@ -32,6 +32,7 @@
 #include <vector>
 
 class XFoam_BrepBase;
+class XFoam_CMshSurfaceEngine;
 
 class XFoam_API XFoam_CMshEdgeInserter
 {
@@ -65,6 +66,16 @@ public:
 		const XFoam_BrepBase&  brep,
 		const Params&          p);
 
+	/// 复用 SurfaceEngine 的 edges / edgePatches，跳过 boundary-point patchId
+	/// 查 + 自建 edge dedup。要求 SE 是基于"perFacePatches=true"的 pm
+	/// 构造的（即 pm.patches 与 brep sub-patch 一一对应），否则 cross-patch
+	/// 判定与 sub-patch 判定不一致。
+	XFoam_CMshEdgeInserter(
+		XFoam_CMshPolyMeshGen&         pm,
+		const XFoam_BrepBase&          brep,
+		const Params&                  p,
+		const XFoam_CMshSurfaceEngine& se);
+
 	Stats insert();
 
 	/// 这次 insert() 新增的 mesh point 下标（pm.points 末尾连续段）。
@@ -73,10 +84,11 @@ public:
 	const std::vector<int>& newPoints() const { return newPts_; }
 
 private:
-	XFoam_CMshPolyMeshGen& pm_;
-	const XFoam_BrepBase&  brep_;
-	Params                 p_;
-	std::vector<int>       newPts_;
+	XFoam_CMshPolyMeshGen&         pm_;
+	const XFoam_BrepBase&          brep_;
+	Params                         p_;
+	const XFoam_CMshSurfaceEngine* se_ = nullptr;
+	std::vector<int>               newPts_;
 };
 
 #endif // XFoam_CMshEdgeInserter_H_

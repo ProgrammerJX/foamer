@@ -1,5 +1,6 @@
 #include "XFoam/cmsh/xfoam_cmshmeshoptimizer.h"
 
+#include "XFoam/cmsh/xfoam_cmshsurfaceengine.h"
 #include "XFoam/topo/xfoam_brep.h"
 
 #include <algorithm>
@@ -17,6 +18,32 @@ XFoam_CMshMeshOptimizer::XFoam_CMshMeshOptimizer(
 {
 	isFixed_.assign(pm_.points.size(), 0);
 	buildBoundaryAdjacency();
+}
+
+XFoam_CMshMeshOptimizer::XFoam_CMshMeshOptimizer(
+	XFoam_CMshPolyMeshGen&         pm,
+	const XFoam_BrepBase&          brep,
+	const Params&                  p,
+	const XFoam_CMshSurfaceEngine& se)
+	: pm_(pm), brep_(brep), p_(p)
+{
+	isFixed_.assign(pm_.points.size(), 0);
+	// 直接搬 SurfaceEngine 的 boundary topology，避免重复扫 pm.faces。
+	bndPoints_ = se.bndPoints();
+	const auto& pp = se.pointPoints();
+	const auto& pf = se.pointFaces();
+	const auto& bndFaceIds = se.bndFaceIds();
+	nbrs_.assign(bndPoints_.size(), {});
+	incidentFaces_.assign(bndPoints_.size(), {});
+	for (std::size_t li = 0; li < bndPoints_.size(); ++li)
+	{
+		// engine.pointPoints 给的是 bnd-local；optimizer 要 global vid
+		nbrs_[li].reserve(pp[li].size());
+		for (int ln : pp[li]) nbrs_[li].push_back(se.bndPoints()[static_cast<std::size_t>(ln)]);
+		// engine.pointFaces 给的是 bnd-face-local；optimizer 要 pm.faces 的 global face id
+		incidentFaces_[li].reserve(pf[li].size());
+		for (int bfi : pf[li]) incidentFaces_[li].push_back(bndFaceIds[static_cast<std::size_t>(bfi)]);
+	}
 }
 
 void XFoam_CMshMeshOptimizer::setFixedPoints(std::vector<int> fixedPointIds)

@@ -4,6 +4,7 @@
 #include "XFoam/cmsh/xfoam_cmshedgeinserter.h"
 #include "XFoam/cmsh/xfoam_cmshfeaturepinner.h"
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
+#include "XFoam/cmsh/xfoam_cmshsurfaceengine.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
 #include "XFoam/cmsh/xfoam_cmshrepatcher.h"
 #include "XFoam/cmsh/xfoam_cmshsurfacemapper.h"
@@ -234,6 +235,20 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		stats.msCoverLoop = ms(tCover0, tCover1);
 	}
 
+	// === 2c) SurfaceEngine：一次性建好所有 boundary topology cache，让后
+	// 续 mapper / pinner / edgeInserter / optimizer 都复用。edgeInserter
+	// 改 topology 后会重建一次。
+	auto buildSE = [&]() {
+		return std::make_unique<XFoam_CMshSurfaceEngine>(pm);
+	};
+	std::unique_ptr<XFoam_CMshSurfaceEngine> se = buildSE();
+	if (p_.verbose)
+	{
+		std::cout << "[cmsh pipeline] surface engine: bndPoints=" << se->nBndPoints()
+		          << ", bndFaces=" << se->nBndFaces()
+		          << ", edges=" << se->nEdges() << "\n";
+	}
+
 	// === 3) mapper ===
 	std::vector<int> bndPoints;
 	if (p_.enableMapper || p_.enableEdgeSnap || p_.enableOptimizer)
@@ -295,7 +310,7 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		pp.pinRadius    = p_.pinRadius;
 		pp.cellSizeHint = cellSizeHint;
 		pp.verbose      = p_.verbose;
-		XFoam_CMshFeaturePinner pinner(pm, brep, pp);
+		XFoam_CMshFeaturePinner pinner(pm, brep, pp, *se);
 		t0 = std::chrono::steady_clock::now();
 		stats.pinStats = pinner.pin();
 		t1 = std::chrono::steady_clock::now();
@@ -319,7 +334,10 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		ep2.cellSizeHint       = cellSizeHint;
 		ep2.requireEdgeFeature = p_.edgeInsertRequireFeature;
 		ep2.verbose            = p_.verbose;
-		XFoam_CMshEdgeInserter inserter(pm, brep, ep2);
+		// SE 只在 perFacePatches 下能正确识别 cross-patch（即 cross-TpFace）
+		XFoam_CMshEdgeInserter inserter = p_.perFacePatches
+			? XFoam_CMshEdgeInserter(pm, brep, ep2, *se)
+			: XFoam_CMshEdgeInserter(pm, brep, ep2);
 		t0 = std::chrono::steady_clock::now();
 		stats.edgeInsertStats = inserter.insert();
 		t1 = std::chrono::steady_clock::now();
@@ -328,6 +346,15 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		for (int pid : inserter.newPoints()) pinnedPts.push_back(pid);
 		stats.nPoints = static_cast<XFoam_Label>(pm.points.size());
 		stats.nFaces  = pm.nFaces();
+		// topology 变了（新 point + face.verts 改），SurfaceEngine 必须重建
+		se = buildSE();
+		if (p_.verbose)
+		{
+			std::cout << "[cmsh pipeline] surface engine rebuilt after edgeInsert:"
+			          << " bndPoints=" << se->nBndPoints()
+			          << ", bndFaces=" << se->nBndFaces()
+			          << ", edges=" << se->nEdges() << "\n";
+		}
 		if (p_.verbose)
 		{
 			std::cout << "[cmsh pipeline] edgeInsert done in " << stats.msEdgeInsert
@@ -353,7 +380,7 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		op.minFaceNormalDot    = p_.optMinFaceNormalDot;
 		op.minFaceAreaRatio    = p_.optMinFaceAreaRatio;
 		op.verbose             = p_.verbose;
-		XFoam_CMshMeshOptimizer optr(pm, brep, op);
+		XFoam_CMshMeshOptimizer optr(pm, brep, op, *se);
 		if (!pinnedPts.empty()) optr.setFixedPoints(pinnedPts);
 
 		t0 = std::chrono::steady_clock::now();

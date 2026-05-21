@@ -1,5 +1,6 @@
 #include "XFoam/cmsh/xfoam_cmshfeaturepinner.h"
 
+#include "XFoam/cmsh/xfoam_cmshsurfaceengine.h"
 #include "XFoam/topo/xfoam_brep.h"
 
 #include <algorithm>
@@ -15,6 +16,18 @@ XFoam_CMshFeaturePinner::XFoam_CMshFeaturePinner(
 	: pm_(pm)
 	, brep_(brep)
 	, p_(p)
+{}
+
+XFoam_CMshFeaturePinner::XFoam_CMshFeaturePinner(
+	XFoam_CMshPolyMeshGen&         pm,
+	const XFoam_BrepBase&          brep,
+	const Params&                  p,
+	const XFoam_CMshSurfaceEngine& se)
+	: pm_(pm)
+	, brep_(brep)
+	, p_(p)
+	, bndPointsCache_(se.bndPoints())
+	, haveBndCache_(true)
 {}
 
 XFoam_CMshFeaturePinner::Stats XFoam_CMshFeaturePinner::pin()
@@ -49,23 +62,29 @@ XFoam_CMshFeaturePinner::Stats XFoam_CMshFeaturePinner::pin()
 		}
 	}
 
-	// boundary point 集合：从 pm.faces 的 boundary 段抽。
-	// （pm 这边没有 isBoundaryPoint flag，需要扫一遍）
-	std::vector<char> isBnd(pm_.points.size(), 0);
-	const XFoam_Label nInt = pm_.nInternalFaces();
-	const XFoam_Label nF   = pm_.nFaces();
-	for (XFoam_Label fi = nInt; fi < nF; ++fi)
-	{
-		for (int v : pm_.faces[static_cast<std::size_t>(fi)].verts)
-		{
-			if (v >= 0 && v < static_cast<int>(isBnd.size())) isBnd[static_cast<std::size_t>(v)] = 1;
-		}
-	}
 	std::vector<int> bndPts;
-	bndPts.reserve(pm_.points.size() / 4);
-	for (std::size_t i = 0; i < isBnd.size(); ++i)
+	if (haveBndCache_)
 	{
-		if (isBnd[i]) bndPts.push_back(static_cast<int>(i));
+		bndPts = bndPointsCache_;
+	}
+	else
+	{
+		// fallback: 扫 pm.faces 自己建（旧路径）
+		std::vector<char> isBnd(pm_.points.size(), 0);
+		const XFoam_Label nInt = pm_.nInternalFaces();
+		const XFoam_Label nF   = pm_.nFaces();
+		for (XFoam_Label fi = nInt; fi < nF; ++fi)
+		{
+			for (int v : pm_.faces[static_cast<std::size_t>(fi)].verts)
+			{
+				if (v >= 0 && v < static_cast<int>(isBnd.size())) isBnd[static_cast<std::size_t>(v)] = 1;
+			}
+		}
+		bndPts.reserve(pm_.points.size() / 4);
+		for (std::size_t i = 0; i < isBnd.size(); ++i)
+		{
+			if (isBnd[i]) bndPts.push_back(static_cast<int>(i));
+		}
 	}
 	if (bndPts.empty())
 	{

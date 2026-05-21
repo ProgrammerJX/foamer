@@ -30,6 +30,7 @@
 #include <vector>
 
 class XFoam_BrepBase;
+class XFoam_CMshSurfaceEngine;
 
 /*---------------------------------------------------------------------------*\
                   Class XFoam_CMshMeshOptimizer Declaration
@@ -66,6 +67,14 @@ public:
 		XFoam_CMshPolyMeshGen& pm,
 		const XFoam_BrepBase& brep,
 		const Params& p);
+
+	/// 复用外部 SurfaceEngine 跳过 buildBoundaryAdjacency。se 寿命需覆盖
+	/// 整个 optimize() 调用，且 pm 必须与 se 构造时同一个对象。
+	XFoam_CMshMeshOptimizer(
+		XFoam_CMshPolyMeshGen&         pm,
+		const XFoam_BrepBase&          brep,
+		const Params&                  p,
+		const XFoam_CMshSurfaceEngine& se);
 
 	/// 设定固定不动的 mesh point 集合（如 featurePinner 产物）。Laplacian /
 	/// reproject / feature snap 均跳过这些点。fixedPointIds 必须升序排好或
