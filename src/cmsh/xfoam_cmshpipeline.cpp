@@ -281,8 +281,37 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		}
 	}
 
-	const XFoam_Scalar cellSizeHint =
-		p_.maxCellSize / static_cast<XFoam_Scalar>(1 << p_.surfLevel);
+	// cellSizeHint：被 edgeSnap / pinner / edgeInserter / optimizer / untangler
+	// 用作默认 search radius 上限。原本写死 maxCellSize / 2^surfLevel —— 在
+	// perFaceFitFeatures / coverAllFaces / localFeatureRefine / curvatureRefine
+	// 启用时局部 leaf 已经被推到 maxLevel，hint 会比真实 leaf 大几十倍 →
+	// snap / pin 把远处 mesh 点也吸进 surface，造成"层层叠加"。
+	//
+	// 改为：从 SE.faceAreas() 取中位数 → sqrt → 自然适应实际 boundary face
+	// 尺度。flat 一刀切场景下退化为原值；adaptive 场景下自动缩小到局部 cell。
+	// SE 空（极少见，例如纯 internal mesh）退回旧公式。
+	XFoam_Scalar cellSizeHint = p_.maxCellSize / static_cast<XFoam_Scalar>(1 << p_.surfLevel);
+	if (se && se->nBndFaces() > 0)
+	{
+		std::vector<XFoam_Scalar> aas;
+		aas.reserve(static_cast<std::size_t>(se->nBndFaces()));
+		for (XFoam_Scalar a : se->faceAreas()) if (a > 0) aas.push_back(a);
+		if (!aas.empty())
+		{
+			std::nth_element(aas.begin(), aas.begin() + aas.size() / 2, aas.end());
+			const XFoam_Scalar medA = aas[aas.size() / 2];
+			const XFoam_Scalar medSize = std::sqrt(medA);
+			if (medSize > 0 && std::isfinite(medSize)) cellSizeHint = medSize;
+		}
+		if (p_.verbose)
+		{
+			std::cout << "[cmsh pipeline] cellSizeHint=" << cellSizeHint
+			          << " (median sqrt(bndFaceArea) over " << aas.size() << " faces;"
+			          << " surfLevel-derived was "
+			          << p_.maxCellSize / static_cast<XFoam_Scalar>(1 << p_.surfLevel)
+			          << ")\n";
+		}
+	}
 
 	// === 4) edge snap ===
 	if (p_.enableEdgeSnap && !bndPoints.empty())
