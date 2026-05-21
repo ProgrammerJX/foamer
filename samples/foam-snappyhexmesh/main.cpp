@@ -154,14 +154,12 @@ int main(int argc, char** argv)
 				return 1;
 			}
 			stlStorage[si].reset(new XFoam_VBrep());
-			try
-			{
-				stlStorage[si]->readStlAscii(XFoam_String(stlPath.string()));
-			}
-			catch (const XFoam_Error& e)
+			// 用 sniff-then-read 的 generic loader，兼容 ASCII / binary STL；
+			// 否则 binary STL 会被 readStlAscii 读成 0 triangles。
+			if (!stlStorage[si]->read(stlPath.string()))
 			{
 				std::cerr << "failed to read STL: " << stlPath.string()
-				          << " (" << e.what() << ")\n";
+				          << " (ascii/binary sniff both failed)\n";
 				return 1;
 			}
 			// Snap #7：dict 打开 implicitFeatureSnap 时让 VBrep 抽一次 feature。

@@ -60,6 +60,24 @@ public:
 		/// 加密追到更小 feature，但 MBrep + OCCT analytic 查询路径下 +2 可能
 		/// 让 castellated 阶段慢 1-2 个数量级（base × 4^extraLevel × nFaces）。
 		XFoam_Label fitFeaturesMaxLevelBump = 1;
+
+		/// snap 完之后把 polyMesh 桥接到 cmsh 后端（SurfaceEngine + Mapper +
+		/// FeaturePinner + EdgeInserter + Optimizer + Untangler）跑一遍。
+		/// snap 原本只做 "snap 一次 → motionSmoother 内传 → relax 回退"，
+		/// 没有 boundary-side Laplacian / surface untangler / TpEdge densify
+		/// 等高质量后处理。打开此开关后效果约等于 cmsh pipeline 的后半段
+		/// 直接跑在 snap 生成的 polyMesh 上。snappyHexMeshDict 顶层
+		/// `useCMshPost true;` 打开；细分开关见 cmshPostControls。
+		bool useCMshPost          = false;
+		bool cmshPostOptimizer    = true;
+		bool cmshPostUntangler    = true;
+		bool cmshPostFeaturePin   = true;
+		bool cmshPostEdgeInsert   = true;
+		bool cmshPostMapper       = false; ///< 默认关：mapper 会再投一次 surface，
+		                                   ///< 与 snap 已做的工作冲突；想完全
+		                                   ///< 替代 snap 投影时再打开
+		int  cmshPostOptIter      = 3;
+		int  cmshPostUntIter      = 3;
 	};
 
 	/// 一个 refinementSurfaces.<name> 入口；resolveStl() 阶段调用方按 surface name

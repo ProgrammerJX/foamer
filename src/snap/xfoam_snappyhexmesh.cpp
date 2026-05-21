@@ -1,8 +1,16 @@
 #include "XFoam/snap/xfoam_snappyhexmesh.h"
 #include "XFoam/snap/xfoam_pointconstraint.h"
 
+#include "XFoam/cmsh/xfoam_cmshedgeinserter.h"
+#include "XFoam/cmsh/xfoam_cmshfeaturepinner.h"
+#include "XFoam/cmsh/xfoam_cmshmeshoptimizer.h"
+#include "XFoam/cmsh/xfoam_cmshmeshuntangler.h"
+#include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
+#include "XFoam/cmsh/xfoam_cmshsurfaceengine.h"
+#include "XFoam/cmsh/xfoam_cmshsurfacemapper.h"
 #include "XFoam/snap/xfoam_blockmesh.h"
 #include "XFoam/snap/xfoam_hex8ref.h"
+#include "XFoam/topo/xfoam_brep.h"
 #include "XFoam/utilities/xfoam_dictionary.h"
 
 #include <algorithm>
@@ -22,6 +30,65 @@
 
 namespace
 {
+// ===== snap polyMesh ↔ XFoam_CMshPolyMeshGen 双向桥（in-memory，无文件 I/O）=====
+// snap 的内部 mesh 形如：
+//   pts: std::vector<XFoam_Vector3D>
+//   facesOut: std::vector<std::vector<int>>  （已按 polyMesh 顺序：先 internal，后各 patch）
+//   ownerOut: 对应 facesOut；nbrOut: 仅 internal 段
+//   patchNamesOut/TypesOut/StartOut/SizeOut: boundary patch 元数据
+// 与 XFoam_CMshPolyMeshGen 完全同构（不同点仅在 std::vector<int> vs Face.verts），
+// 故拷贝 + 字段映射即可。
+void snapVectorsToCMshPm(
+	const std::vector<XFoam_Vector3D>&        pts,
+	const std::vector<std::vector<int>>&      facesOut,
+	const std::vector<int>&                   ownerOut,
+	const std::vector<int>&                   nbrOut,
+	const std::vector<std::string>&           patchNames,
+	const std::vector<std::string>&           patchTypes,
+	const std::vector<XFoam_Label>&           patchStart,
+	const std::vector<XFoam_Label>&           patchSize,
+	int                                       nCells,
+	XFoam_CMshPolyMeshGen&                    pm)
+{
+	pm.points = pts;
+	pm.faces.resize(facesOut.size());
+	for (std::size_t i = 0; i < facesOut.size(); ++i)
+		pm.faces[i].verts = facesOut[i];
+	pm.owner     = ownerOut;
+	pm.neighbour = nbrOut;
+	pm.nCells    = nCells;
+	pm.patches.clear();
+	pm.patches.reserve(patchNames.size());
+	for (std::size_t p = 0; p < patchNames.size(); ++p)
+	{
+		XFoam_CMshPolyMeshGen::Patch P;
+		P.name      = patchNames[p];
+		P.type      = patchTypes[p];
+		P.startFace = static_cast<int>(patchStart[p]);
+		P.nFaces    = static_cast<int>(patchSize[p]);
+		pm.patches.push_back(std::move(P));
+	}
+}
+
+void cmshPmBackToSnapVectors(
+	const XFoam_CMshPolyMeshGen&        pm,
+	std::vector<XFoam_Vector3D>&        pts,
+	std::vector<std::vector<int>>&      facesOut,
+	std::vector<int>&                   ownerOut,
+	std::vector<int>&                   nbrOut)
+{
+	pts = pm.points;
+	facesOut.resize(pm.faces.size());
+	for (std::size_t i = 0; i < pm.faces.size(); ++i)
+		facesOut[i] = pm.faces[i].verts;
+	ownerOut = pm.owner;
+	nbrOut   = pm.neighbour;
+	// patches 不回写：cmsh 工具链都只改 face.verts 的 vertex 列表（mapper /
+	// optimizer / untangler 只改 pm.points；edgeInserter 只 push 新点 + 在
+	// 现有 face 中插入新顶点编号）。pm.faces.size() / owner / nbr / patch
+	// boundary 区段长度都不变，所以原 snap 端的 patchStart/Size 仍然有效。
+}
+
 // 单 hex 块 8 角点（OF 习惯：i-fastest，j 其次，k 最慢）按 (i,j,k) ∈ {0,1}^3 的三线性插值。
 // 顺序与 XFoam_CellModel::hex 一致：
 //   v0=(0,0,0) v1=(1,0,0) v2=(1,1,0) v3=(0,1,0)
@@ -267,6 +334,15 @@ void XFoam_SnappyHexMesh::readPhaseFlags(const XFoam_Dictionary& dict)
 	(void)dict.readIfPresent(XFoam_Word("fitFeatures"), phases_.fitFeatures);
 	(void)dict.readIfPresent(XFoam_Word("fitFeaturesMaxLevelBump"),
 	                         phases_.fitFeaturesMaxLevelBump);
+	// cmsh post-process bridge：snap 完之后挂 cmsh 工具链
+	(void)dict.readIfPresent(XFoam_Word("useCMshPost"),         phases_.useCMshPost);
+	(void)dict.readIfPresent(XFoam_Word("cmshPostOptimizer"),   phases_.cmshPostOptimizer);
+	(void)dict.readIfPresent(XFoam_Word("cmshPostUntangler"),   phases_.cmshPostUntangler);
+	(void)dict.readIfPresent(XFoam_Word("cmshPostFeaturePin"),  phases_.cmshPostFeaturePin);
+	(void)dict.readIfPresent(XFoam_Word("cmshPostEdgeInsert"),  phases_.cmshPostEdgeInsert);
+	(void)dict.readIfPresent(XFoam_Word("cmshPostMapper"),      phases_.cmshPostMapper);
+	(void)dict.readIfPresent(XFoam_Word("cmshPostOptIter"),     phases_.cmshPostOptIter);
+	(void)dict.readIfPresent(XFoam_Word("cmshPostUntIter"),     phases_.cmshPostUntIter);
 }
 
 void XFoam_SnappyHexMesh::tuneForFeatures(
@@ -2033,6 +2109,146 @@ bool XFoam_SnappyHexMesh::run(
 	stats.nFaces  = static_cast<XFoam_Label>(facesOut.size());
 	stats.nInternalFaces = static_cast<XFoam_Label>(internalIdx.size());
 	stats.nBoundaryFaces = stats.nFaces - stats.nInternalFaces;
+
+	// ----- 9.5. cmsh post-process bridge -----
+	// snap 自身只做 "投影 → 内部 displacement Laplacian → relax 回退" 三件套，
+	// 没有 boundary-side surface smoother / untangler / TpEdge densify。
+	// useCMshPost 打开时把 polyMesh 桥到 cmsh 后端再跑 mapper / featurePinner
+	// / edgeInserter / optimizer / untangler，效果与 cmsh pipeline 后半段等价。
+	// brep 取 stls[0]（primary surface）—— 与 cmsh pipeline 输入约定一致。
+	if (phases_.useCMshPost && nSurf > 0 && stls[0] && !stls[0]->empty())
+	{
+		const XFoam_BrepBase& brep = *stls[0];
+		XFoam_CMshPolyMeshGen pm;
+		snapVectorsToCMshPm(
+			pts, facesOut, ownerOut, nbrOut,
+			patchNamesOut, patchTypesOut, patchStartOut, patchSizeOut,
+			static_cast<int>(stats.nKeptCells),
+			pm);
+		XFoam_CMshSurfaceEngine se(pm);
+		// cellSizeHint：用 SurfaceEngine 的 median bnd face area 取 sqrt
+		// （对齐 cmsh pipeline 的逻辑：在 adaptive refine 下能自动收缩）。
+		XFoam_Scalar cellSizeHint = static_cast<XFoam_Scalar>(1);
+		if (se.nBndFaces() > 0)
+		{
+			std::vector<XFoam_Scalar> aas;
+			aas.reserve(static_cast<std::size_t>(se.nBndFaces()));
+			for (XFoam_Scalar a : se.faceAreas()) if (a > 0) aas.push_back(a);
+			if (!aas.empty())
+			{
+				std::nth_element(aas.begin(), aas.begin() + aas.size() / 2, aas.end());
+				const XFoam_Scalar medA = aas[aas.size() / 2];
+				const XFoam_Scalar medSize = std::sqrt(medA);
+				if (medSize > 0 && std::isfinite(medSize)) cellSizeHint = medSize;
+			}
+		}
+		std::cout << "  cmshPost: bndPoints=" << se.nBndPoints()
+		          << ", bndFaces=" << se.nBndFaces()
+		          << ", edges=" << se.nEdges()
+		          << ", cellSizeHint=" << cellSizeHint << "\n";
+
+		std::vector<int> pinnedPts;
+
+		// (a) optional mapper: 把所有 boundary 点重投到 surface（snap 已做过
+		//     一次，默认关；用户可显式打开做"second pass"）
+		if (phases_.cmshPostMapper)
+		{
+			XFoam_CMshSurfaceMapper::Params mp;
+			mp.nIterations = 2;
+			mp.relaxFactor = static_cast<XFoam_Scalar>(1.0);
+			mp.verbose     = false;
+			XFoam_CMshSurfaceMapper mapper(pm, brep, mp);
+			const auto n = mapper.mapToSurface();
+			std::cout << "  cmshPost mapper: moved=" << n << "\n";
+		}
+
+		// (b) feature pinner：把 boundary mesh point snap 到 TpVertex
+		if (phases_.cmshPostFeaturePin && brep.nFeatureVertices() > 0)
+		{
+			XFoam_CMshFeaturePinner::Params pp;
+			pp.pinRadius    = cellSizeHint * static_cast<XFoam_Scalar>(2);
+			pp.cellSizeHint = cellSizeHint;
+			pp.verbose      = false;
+			XFoam_CMshFeaturePinner pinner(pm, brep, pp, se);
+			const auto pst = pinner.pin();
+			std::cout << "  cmshPost pinner: pinned=" << pst.nPinned
+			          << "/" << pst.nTpVerts << "\n";
+			for (int v : pinner.pinnedPoints()) pinnedPts.push_back(v);
+		}
+
+		// (c) edge inserter：cross-patch boundary edge 上插点对齐到 TpEdge。
+		//     需要 perFacePatches 模式下 patch 与 sub-patch 一一对应才有意
+		//     义；否则 cross-patch 判定退化为 "snap 端 wall vs surface"，
+		//     无 TpEdge 概念可言。
+		if (phases_.cmshPostEdgeInsert && perFace && brep.nFeatureEdges() > 0)
+		{
+			XFoam_CMshEdgeInserter::Params ep;
+			ep.searchRadius       = cellSizeHint;
+			ep.cellSizeHint       = cellSizeHint;
+			ep.requireEdgeFeature = false;
+			ep.verbose            = false;
+			XFoam_CMshEdgeInserter ins(pm, brep, ep, se);
+			const auto ist = ins.insert();
+			std::cout << "  cmshPost edgeInsert: bndEdges=" << ist.nBoundaryEdges
+			          << " crossPatch=" << ist.nCrossPatch
+			          << " inserted=" << ist.nInserted
+			          << " faceGrown=" << ist.nFacesGrown << "\n";
+			for (int v : ins.newPoints()) pinnedPts.push_back(v);
+		}
+
+		// edgeInsert 之后 SE 必须重建（faces.verts 改了，edges 多了）
+		std::unique_ptr<XFoam_CMshSurfaceEngine> se2;
+		if (phases_.cmshPostEdgeInsert && perFace && brep.nFeatureEdges() > 0)
+		{
+			se2 = std::make_unique<XFoam_CMshSurfaceEngine>(pm);
+		}
+		const XFoam_CMshSurfaceEngine& seCur = se2 ? *se2 : se;
+
+		// (d) boundary Laplacian + reproject + quality rollback
+		if (phases_.cmshPostOptimizer)
+		{
+			XFoam_CMshMeshOptimizer::Params op;
+			op.nIterations  = phases_.cmshPostOptIter;
+			op.relaxFactor  = static_cast<XFoam_Scalar>(0.5);
+			op.reproject    = true;
+			op.snapFeatures = true;
+			op.featureSearchRadius = cellSizeHint * static_cast<XFoam_Scalar>(0.5);
+			op.cellSizeHint = cellSizeHint;
+			op.qualityCheck = true;
+			op.verbose      = false;
+			XFoam_CMshMeshOptimizer opt(pm, brep, op, seCur);
+			if (!pinnedPts.empty()) opt.setFixedPoints(pinnedPts);
+			const auto ost = opt.optimize();
+			std::cout << "  cmshPost optimizer: moved=" << ost.nMoved
+			          << " avg=" << ost.avgMove
+			          << " max=" << ost.maxMove
+			          << " rollback=" << ost.nRollback << "\n";
+		}
+
+		// (e) untangler：兜底翻转 face
+		if (phases_.cmshPostUntangler)
+		{
+			XFoam_CMshMeshUntangler::Params up;
+			up.nIterations  = phases_.cmshPostUntIter;
+			up.cellSizeHint = cellSizeHint;
+			up.reproject    = true;
+			up.verbose      = false;
+			XFoam_CMshMeshUntangler unt(pm, &brep, up, seCur);
+			if (!pinnedPts.empty()) unt.setFixedPoints(pinnedPts);
+			const auto ust = unt.untangle();
+			std::cout << "  cmshPost untangler: tangled "
+			          << ust.nFacesTangled0 << " -> " << ust.nFacesTangledN
+			          << " (improved=" << ust.nPointsImproved
+			          << ", maxMove=" << ust.maxMove << ")\n";
+		}
+
+		// 写回 snap 端 vector
+		cmshPmBackToSnapVectors(pm, pts, facesOut, ownerOut, nbrOut);
+		stats.nPoints = static_cast<XFoam_Label>(pts.size());
+		stats.nFaces  = static_cast<XFoam_Label>(facesOut.size());
+		stats.nInternalFaces = static_cast<XFoam_Label>(nbrOut.size());
+		stats.nBoundaryFaces = stats.nFaces - stats.nInternalFaces;
+	}
 
 	// ----- 10. 写文件 -----
 	const std::string outDirStr = static_cast<const std::string&>(static_cast<const XFoam_String&>(outPolyMeshDir));

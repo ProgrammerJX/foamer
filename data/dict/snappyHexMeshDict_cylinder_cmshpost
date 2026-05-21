@@ -1,0 +1,70 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| cylinder1 + cmsh post-process bridge：snap 之后挂 SurfaceEngine + Pinner +
+| EdgeInsert + Optimizer + Untangler。
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+
+castellatedMesh true;
+snap            true;
+addLayers       false;
+
+// 一面一 patch；edgeInsert / featurePin 需要 perFacePatches，否则 cross-patch 判定退化
+perFacePatches  true;
+
+useCMshPost            true;
+cmshPostOptimizer      true;
+cmshPostUntangler      true;
+cmshPostFeaturePin     true;
+cmshPostEdgeInsert     true;
+cmshPostMapper         false;
+cmshPostOptIter        3;
+cmshPostUntIter        3;
+
+geometry
+{
+    cylinder1.stl
+    {
+        type triSurfaceMesh;
+        name cylinder1;
+    }
+}
+
+castellatedMeshControls
+{
+    maxLocalCells       2000000;
+    maxGlobalCells      4000000;
+    minRefinementCells  0;
+    nCellsBetweenLevels 1;
+    resolveFeatureAngle 30;
+    refinementSurfaces
+    {
+        cylinder1 { level (4 4); }
+    }
+    locationInMesh (0.9 0.9 0.9);
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    nSmoothPatch       3;
+    tolerance          2.0;
+    nSolveIter         30;
+    nRelaxIter         5;
+    nFeatureSnapIter   10;
+}
+
+addLayersControls
+{
+    relativeSizes       true;
+    expansionRatio      1.2;
+    finalLayerThickness 0.3;
+    minThickness        0.1;
+    nGrow               0;
+    featureAngle        60;
+}
