@@ -143,6 +143,18 @@ public:
 	/// "adjust octree to surface"）。
 	void refineToSurface(int targetLevel);
 
+	/// Per-TopoDS_Face 的 refineToSurface：对每个 surface-touching leaf，按
+	/// `surface_.closestSubPatchId(leaf.centre)` 反查到所属 sub-patch s，再用
+	/// perFaceLevel[s] 作为该 leaf 的目标 level。perFaceLevel.size() 必须 ==
+	/// `surface_.nSubPatches()`；level 一律 clamp 到 globalCap。
+	///
+	/// 用途：creator 的 per-face fitFeatures —— 全局 surfLevel 之外，按每张
+	/// TpFace 自己的 bbox / 最短边再加密，让小 TpFace 真正有 cell 落上去，
+	/// 又不至于把大 TpFace 跟着炸成天文数字 leaf。
+	void refineToSurfacePerFace(
+		const std::vector<int>& perFaceLevel,
+		int globalCap);
+
 	/// 把所有"box 与 region overlaps"的 leaf 加密到 targetLevel。
 	void refineRegion(const XFoam_BoundBox& region, int targetLevel);
 

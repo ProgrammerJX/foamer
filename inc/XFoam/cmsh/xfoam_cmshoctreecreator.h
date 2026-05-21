@@ -71,6 +71,18 @@ public:
 		bool         fitFeatures             = false;
 		XFoam_Scalar fitFeaturesSafety       = static_cast<XFoam_Scalar>(0.5);
 		int          fitFeaturesMaxLevelBump = 2;
+
+		/// fitFeatures 升级版：按每张 TopoDS_Face 自己的 bbox 反推 level
+		/// （而非一刀切提全局 surfLevel）。对小 TpFace 多加密，对大 TpFace
+		/// 保持原 level，避免全局 leaf 数爆炸。具体规则：
+		///   bbox_min_side = min(subPatchBounds(s).span_x|y|z)
+		///   wanted        = bbox_min_side * perFaceFitFeaturesSafety
+		///   needed        = ceil(log2(maxRootSpan / wanted))
+		///   targetLevel   = clamp(needed, surfLevel,
+		///                          surfLevel + fitFeaturesMaxLevelBump, maxLevel)
+		/// 然后调 refineToSurfacePerFace。需要 brep.subPatchBounds() 支持。
+		bool         perFaceFitFeatures      = false;
+		XFoam_Scalar perFaceFitFeaturesSafety = static_cast<XFoam_Scalar>(0.5);
 	};
 
 	/// rootBox 通常 = primary brep.bounds()；OctreeCreator 视 inflateRoot 决定

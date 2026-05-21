@@ -151,6 +151,7 @@ public:
 	XFoam_Label nSubPatches() const override { return faces_.size(); }
 	XFoam_String subPatchName(XFoam_Label id) const override;
 	XFoam_Label closestSubPatchId(const XFoam_Vector3D& p) const override;
+	XFoam_BoundBox subPatchBounds(XFoam_Label id) const override;
 
 	/// 最短 feature TopoDS_Edge 长度（sampled 多段线累计弦长）。buildFeatures
 	/// 未调用过时返回 0。

@@ -53,6 +53,8 @@ struct Args
 	bool         fitFeatures    = false;
 	double       fitFeatSafety  = 0.5;
 	int          fitFeatBump    = 2;
+	bool         perFaceFit     = false;
+	double       perFaceFitSafety = 0.5;
 	bool         useLocationInMesh = false;
 	double       lim[3] = {0, 0, 0};
 
@@ -112,6 +114,8 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-fitFeatures") == 0) { a.fitFeatures = true; }
 		else if (std::strcmp(arg, "-fitFeatSafety") == 0) { if (!next(a.fitFeatSafety)) return false; }
 		else if (std::strcmp(arg, "-fitFeatBump")   == 0) { if (!nexti(a.fitFeatBump))  return false; }
+		else if (std::strcmp(arg, "-perFaceFit")    == 0) { a.perFaceFit = true; }
+		else if (std::strcmp(arg, "-perFaceFitSafety") == 0) { if (!next(a.perFaceFitSafety)) return false; }
 		else if (std::strcmp(arg, "-locationInMesh") == 0)
 		{
 			if (!next(a.lim[0]) || !next(a.lim[1]) || !next(a.lim[2])) return false;
@@ -224,9 +228,11 @@ int main(int argc, char** argv)
 		pp.maxCellSize             = static_cast<XFoam_Scalar>(A.maxCellSize);
 		pp.surfLevel               = A.surfLevel;
 		pp.maxLevel                = A.surfLevel + 4;
-		pp.fitFeatures             = A.fitFeatures;
-		pp.fitFeaturesSafety       = static_cast<XFoam_Scalar>(A.fitFeatSafety);
-		pp.fitFeaturesMaxLevelBump = A.fitFeatBump;
+		pp.fitFeatures               = A.fitFeatures;
+		pp.fitFeaturesSafety         = static_cast<XFoam_Scalar>(A.fitFeatSafety);
+		pp.fitFeaturesMaxLevelBump   = A.fitFeatBump;
+		pp.perFaceFitFeatures        = A.perFaceFit;
+		pp.perFaceFitFeaturesSafety  = static_cast<XFoam_Scalar>(A.perFaceFitSafety);
 		pp.perFacePatches          = A.perFacePatches;
 		pp.fillAllSubPatches       = A.fillAllSubPatches;
 		pp.repatchAfterMap         = !A.noRepatch;

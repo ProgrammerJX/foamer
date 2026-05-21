@@ -54,6 +54,12 @@ public:
 		XFoam_Scalar fitFeaturesSafety       = static_cast<XFoam_Scalar>(0.5);
 		int          fitFeaturesMaxLevelBump = 2;
 
+		/// per-TopoDS_Face fitFeatures：按每张 face 自己的 bbox 反推加密 level，
+		/// 只把小 TpFace 加密，避免全局 leaf 爆炸。fitFeaturesMaxLevelBump 同
+		/// 时充当 cap。开此项时通常关掉 fitFeatures（避免双重 bump）。
+		bool         perFaceFitFeatures       = false;
+		XFoam_Scalar perFaceFitFeaturesSafety = static_cast<XFoam_Scalar>(0.5);
+
 		// ---- extractor ----
 		bool         keepInside              = true;
 		bool         keepData                = true;

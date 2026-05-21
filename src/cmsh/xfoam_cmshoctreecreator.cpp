@@ -120,6 +120,76 @@ XFoam_AutoPtr<XFoam_CMshOctree> XFoam_CMshOctreeCreator::build() const
 		oct().refineToSurface(lv);
 	}
 
+	// 4b) perFaceFitFeatures：按每张 TopoDS_Face 自己 bbox 反推额外 level
+	//     只对 primary surface 生效（与 oct.surface_ 一致才能用 closestSubPatchId）。
+	if (p_.perFaceFitFeatures && !surfsResolved.empty())
+	{
+		const auto& sr  = surfsResolved.front();
+		const auto* bp  = sr.brep;
+		if (bp && !bp->empty())
+		{
+			const XFoam_Label nSub = bp->nSubPatches();
+			if (nSub > 0)
+			{
+				const int baseSurfLv = std::min(sr.level, p_.maxLevel);
+				const int bumpCap    = std::min(baseSurfLv + p_.fitFeaturesMaxLevelBump, p_.maxLevel);
+				std::vector<int> perFaceLevel(static_cast<std::size_t>(nSub), baseSurfLv);
+				int nBumped     = 0;
+				int nCapped     = 0;     ///< 想要的 level 被 bumpCap/maxLevel 截断
+				int maxRequest  = baseSurfLv; ///< 真正想要的最大 level（截断前）
+				std::vector<int> levelHist(static_cast<std::size_t>(p_.maxLevel + 1), 0);
+				for (XFoam_Label s = 0; s < nSub; ++s)
+				{
+					const XFoam_BoundBox b = bp->subPatchBounds(s);
+					if (b.max().x() < b.min().x()) continue; // invalid
+					const XFoam_Vector3D fs = b.span();
+					// 取 bbox 三轴最短边（避免被薄板 / 退化轴拉成几乎 0）；
+					// 完全 0 也容忍（degenerate sliver），跳过。
+					XFoam_Scalar minSide = std::min({fs.x(), fs.y(), fs.z()});
+					if (minSide <= 0) continue;
+					const XFoam_Scalar wanted = minSide * p_.perFaceFitFeaturesSafety;
+					if (wanted <= 0 || sMax <= 0) continue;
+					const double ratio = static_cast<double>(sMax) / static_cast<double>(wanted);
+					if (ratio <= 1.0) continue;
+					const int needed = static_cast<int>(std::ceil(std::log(ratio) / std::log(2.0)));
+					if (needed > maxRequest) maxRequest = needed;
+					const int target = std::min({needed, bumpCap, p_.maxLevel});
+					if (needed > target) ++nCapped;
+					if (target > perFaceLevel[static_cast<std::size_t>(s)])
+					{
+						perFaceLevel[static_cast<std::size_t>(s)] = target;
+						++nBumped;
+					}
+				}
+				for (XFoam_Label s = 0; s < nSub; ++s)
+				{
+					const int lv = perFaceLevel[static_cast<std::size_t>(s)];
+					if (lv >= 0 && lv <= p_.maxLevel) ++levelHist[static_cast<std::size_t>(lv)];
+				}
+				if (nBumped > 0)
+				{
+					std::cout << "  perFaceFitFeatures: bumped " << nBumped
+					          << "/" << nSub << " TopoDS_Face levels (cap="
+					          << bumpCap << ", max wanted=" << maxRequest;
+					if (nCapped > 0) std::cout << ", " << nCapped << " capped";
+					std::cout << ")\n  per-face level histogram: ";
+					for (int lv = 0; lv <= p_.maxLevel; ++lv)
+					{
+						if (levelHist[static_cast<std::size_t>(lv)] == 0) continue;
+						std::cout << "L" << lv << "=" << levelHist[static_cast<std::size_t>(lv)] << " ";
+					}
+					std::cout << "\n";
+					oct().refineToSurfacePerFace(perFaceLevel, p_.maxLevel);
+				}
+				else
+				{
+					std::cout << "  perFaceFitFeatures: no TopoDS_Face required "
+					             "bump above surfLevel=" << baseSurfLv << "\n";
+				}
+			}
+		}
+	}
+
 	// 5) region refines
 	for (const auto& rr : regions_)
 	{

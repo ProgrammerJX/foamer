@@ -778,6 +778,26 @@ XFoam_Label XFoam_MBrep::closestSubPatchId(const XFoam_Vector3D& p) const
 	return queryProxy_().closestSubPatchId(p);
 }
 
+XFoam_BoundBox XFoam_MBrep::subPatchBounds(XFoam_Label id) const
+{
+	if (id < 0 || id >= faces_.size()) return XFoam_BoundBox();
+	// 优先用 OCCT 解析 bbox（precise）；faceBboxCache_ 与 faces_ 一一对应。
+	ensureBboxCache();
+	if (id < static_cast<XFoam_Label>(faceBboxCache_.size()))
+	{
+		const XFoam_BoundBox& b = faceBboxCache_[id];
+		// invertedBox 表示该 face OCCT 取 bbox 失败 → 回退离散
+		if (b.max().x() >= b.min().x()) return b;
+	}
+	// 回退：用 queryProxy（toVBrep 烘焙）算 sub-patch 离散 bbox。
+	ensureQueryProxy();
+	if (queryProxy_.valid() && !queryProxy_().empty())
+	{
+		return queryProxy_().subPatchBounds(id);
+	}
+	return XFoam_BoundBox();
+}
+
 bool XFoam_MBrep::contains(const XFoam_Vector3D& p) const
 {
 	// 委托给内置 VBrep 代理（BVH ray-cast 计数法）。

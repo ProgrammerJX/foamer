@@ -388,6 +388,41 @@ void XFoam_CMshOctree::refineToSurface(int targetLevel)
 	}
 }
 
+void XFoam_CMshOctree::refineToSurfacePerFace(
+	const std::vector<int>& perFaceLevel,
+	int globalCap)
+{
+	if (perFaceLevel.empty()) return;
+	if (globalCap <= 0) return;
+
+	bool progressed = true;
+	while (progressed)
+	{
+		progressed = false;
+		std::vector<XFoam_CMshOctreeCube*> snap = leaves_;
+		for (auto* leaf : snap)
+		{
+			const int lv = static_cast<int>(leaf->level);
+			if (lv >= globalCap) continue;
+			XFoam_Vector3D mn, mx;
+			leaf->cubeBox(rootBox_, mn, mx);
+			XFoam_BoundBox bb(mn, mx);
+			if (!surface_.boxIntersects(bb)) continue;
+			const XFoam_Vector3D c(
+				static_cast<XFoam_Scalar>(0.5) * (mn.x() + mx.x()),
+				static_cast<XFoam_Scalar>(0.5) * (mn.y() + mx.y()),
+				static_cast<XFoam_Scalar>(0.5) * (mn.z() + mx.z()));
+			const XFoam_Label s = surface_.closestSubPatchId(c);
+			if (s < 0 || s >= static_cast<XFoam_Label>(perFaceLevel.size())) continue;
+			const int target = std::min(perFaceLevel[static_cast<std::size_t>(s)], globalCap);
+			if (lv >= target) continue;
+			leaf->subdivide();
+			progressed = true;
+		}
+		if (progressed) rebuildLeaves();
+	}
+}
+
 void XFoam_CMshOctree::refineRegion(const XFoam_BoundBox& region, int targetLevel)
 {
 	if (targetLevel <= 0) return;

@@ -166,6 +166,15 @@ public:
 	virtual XFoam_String subPatchName(XFoam_Label /*id*/) const { return XFoam_String(); }
 	virtual XFoam_Label closestSubPatchId(const XFoam_Vector3D& /*p*/) const { return -1; }
 
+	/// 单个 sub-patch 的 bbox。MBrep 走 BRepBndLib 取 TopoDS_Face bbox；VBrep
+	/// 走该 patchId 下所有三角面 union。无效 id / 不支持时返回 invalid bbox。
+	/// 用途：creator 的 per-face fitFeatures 按每张 TpFace 自己的尺度反推
+	/// 所需 surfLevel，而非全局一刀切。
+	virtual XFoam_BoundBox subPatchBounds(XFoam_Label /*id*/) const
+	{
+		return XFoam_BoundBox(); // invalid
+	}
+
 	/// 最小 feature 尺度（mm 等线性单位）。返回的语义：
 	///   * VBrep：featureEdges_ 中最短的一段（一条 DiscreteEdge）长度。
 	///   * MBrep：featureEdgeIdx_ 对应 ParametricEdge 的 sampled 多段线总长

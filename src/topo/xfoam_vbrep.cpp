@@ -1320,6 +1320,35 @@ XFoam_Label XFoam_VBrep::closestSubPatchId(const XFoam_Vector3D& p) const
 	return faces_[bestTri].patchId;
 }
 
+XFoam_BoundBox XFoam_VBrep::subPatchBounds(XFoam_Label id) const
+{
+	// 扫所有 face：若 face.patchId == id，把其 3 个顶点的 bbox union 进去。
+	// 离散表示下这就是该 sub-patch 在空间里的精确包围盒。
+	XFoam_BoundBox b;
+	bool any = false;
+	for (XFoam_Label fi = 0; fi < faces_.size(); ++fi)
+	{
+		if (faces_[fi].patchId != id) continue;
+		for (int k = 0; k < 3; ++k)
+		{
+			const XFoam_Label v = faces_[fi].verts[k];
+			if (v < 0 || v >= positions_.size()) continue;
+			const XFoam_Vector3D& p = positions_[v];
+			if (!any) { b.min() = p; b.max() = p; any = true; }
+			else
+			{
+				if (p.x() < b.min().x()) b.min().x() = p.x();
+				if (p.y() < b.min().y()) b.min().y() = p.y();
+				if (p.z() < b.min().z()) b.min().z() = p.z();
+				if (p.x() > b.max().x()) b.max().x() = p.x();
+				if (p.y() > b.max().y()) b.max().y() = p.y();
+				if (p.z() > b.max().z()) b.max().z() = p.z();
+			}
+		}
+	}
+	return b; // invalid bbox if no triangle matched
+}
+
 void XFoam_VBrep::rebuildFeaturesGeomFromEdges(XFoam_Scalar /*featureAngleDeg*/) const
 {
 	featureEdges_.clear();
