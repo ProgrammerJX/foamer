@@ -58,6 +58,10 @@ struct Args
 	double       perFaceFitSafety = 0.5;
 	bool         coverAllFaces  = false;
 	int          coverRounds    = 3;
+	bool         pinFeatures    = false;
+	double       pinRadius      = 0;
+	bool         edgeInsert     = false;
+	double       edgeInsertR    = 0;
 	bool         useLocationInMesh = false;
 	double       lim[3] = {0, 0, 0};
 
@@ -122,6 +126,10 @@ bool parse(int argc, char** argv, Args& a)
 		else if (std::strcmp(arg, "-perFaceFitSafety") == 0) { if (!next(a.perFaceFitSafety)) return false; }
 		else if (std::strcmp(arg, "-coverAllFaces") == 0) { a.coverAllFaces = true; }
 		else if (std::strcmp(arg, "-coverRounds")   == 0) { if (!nexti(a.coverRounds)) return false; }
+		else if (std::strcmp(arg, "-pinFeatures")   == 0) { a.pinFeatures = true; }
+		else if (std::strcmp(arg, "-pinRadius")     == 0) { if (!next(a.pinRadius)) return false; }
+		else if (std::strcmp(arg, "-edgeInsert")    == 0) { a.edgeInsert = true; }
+		else if (std::strcmp(arg, "-edgeInsertRadius") == 0) { if (!next(a.edgeInsertR)) return false; }
 		else if (std::strcmp(arg, "-locationInMesh") == 0)
 		{
 			if (!next(a.lim[0]) || !next(a.lim[1]) || !next(a.lim[2])) return false;
@@ -241,6 +249,10 @@ int main(int argc, char** argv)
 		pp.perFaceFitFeaturesSafety  = static_cast<XFoam_Scalar>(A.perFaceFitSafety);
 		pp.coverAllFaces             = A.coverAllFaces;
 		pp.coverAllFacesMaxRounds    = A.coverRounds;
+		pp.enableFeaturePinner       = A.pinFeatures;
+		pp.pinRadius                 = static_cast<XFoam_Scalar>(A.pinRadius);
+		pp.enableEdgeInsert          = A.edgeInsert;
+		pp.edgeInsertRadius          = static_cast<XFoam_Scalar>(A.edgeInsertR);
 		pp.perFacePatches          = A.perFacePatches;
 		pp.fillAllSubPatches       = A.fillAllSubPatches;
 		pp.repatchAfterMap         = !A.noRepatch;

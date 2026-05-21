@@ -67,6 +67,11 @@ public:
 		const XFoam_BrepBase& brep,
 		const Params& p);
 
+	/// 设定固定不动的 mesh point 集合（如 featurePinner 产物）。Laplacian /
+	/// reproject / feature snap 均跳过这些点。fixedPointIds 必须升序排好或
+	/// 内部会排一次。
+	void setFixedPoints(std::vector<int> fixedPointIds);
+
 	/// 原地修改 pm.points；返回最末轮 stats。
 	Stats optimize();
 
@@ -79,6 +84,7 @@ private:
 	std::vector<int>              bndPoints_;
 	std::vector<std::vector<int>> nbrs_;          ///< 与 bndPoints_ 一一对应；存的是 globalVID
 	std::vector<std::vector<int>> incidentFaces_; ///< 与 bndPoints_ 一一对应；存的是 boundary faceIdx
+	std::vector<char>             isFixed_;       ///< 与 pm.points 同尺寸；1 = 固定不动
 
 	void buildBoundaryAdjacency();
 	void reprojectOne(int vid);

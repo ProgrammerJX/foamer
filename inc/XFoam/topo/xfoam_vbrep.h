@@ -123,6 +123,13 @@ public:
 	{
 		return static_cast<XFoam_Label>(featureVerts_.size());
 	}
+	XFoam_Vector3D featureVertexPosition(XFoam_Label i) const override
+	{
+		ensureAcceleration();
+		if (i < 0 || i >= static_cast<XFoam_Label>(featureVerts_.size()))
+			return XFoam_Vector3D(0, 0, 0);
+		return featureVerts_[static_cast<std::size_t>(i)].p;
+	}
 	FeatureKind closestFeature(
 		const XFoam_Vector3D& p,
 		XFoam_Scalar          searchRadius,

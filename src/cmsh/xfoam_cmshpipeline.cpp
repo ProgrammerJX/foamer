@@ -1,6 +1,8 @@
 #include "XFoam/cmsh/xfoam_cmshpipeline.h"
 
 #include "XFoam/cmsh/xfoam_cmshcartesianextractor.h"
+#include "XFoam/cmsh/xfoam_cmshedgeinserter.h"
+#include "XFoam/cmsh/xfoam_cmshfeaturepinner.h"
 #include "XFoam/cmsh/xfoam_cmshoctree.h"
 #include "XFoam/cmsh/xfoam_cmshoctreecreator.h"
 #include "XFoam/cmsh/xfoam_cmshrepatcher.h"
@@ -282,6 +284,59 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		}
 	}
 
+	// === 4b) feature pinner (B1: TpVertex 钉死) ===
+	std::vector<int> pinnedPts;
+	if (p_.enableFeaturePinner)
+	{
+		XFoam_CMshFeaturePinner::Params pp;
+		pp.pinRadius    = p_.pinRadius;
+		pp.cellSizeHint = cellSizeHint;
+		pp.verbose      = p_.verbose;
+		XFoam_CMshFeaturePinner pinner(pm, brep, pp);
+		t0 = std::chrono::steady_clock::now();
+		stats.pinStats = pinner.pin();
+		t1 = std::chrono::steady_clock::now();
+		stats.msPin = ms(t0, t1);
+		pinnedPts = pinner.pinnedPoints();
+		if (p_.verbose)
+		{
+			std::cout << "[cmsh pipeline] pinner done in " << stats.msPin
+			          << " ms (tpVerts=" << stats.pinStats.nTpVerts
+			          << ", pinned=" << stats.pinStats.nPinned
+			          << ", oor=" << stats.pinStats.nOutOfRange
+			          << ", conflict=" << stats.pinStats.nConflictSkipped << ")\n";
+		}
+	}
+
+	// === 4c) edge inserter (B2: TpEdge densify; cfMesh createEdgeVertices) ===
+	if (p_.enableEdgeInsert)
+	{
+		XFoam_CMshEdgeInserter::Params ep2;
+		ep2.searchRadius       = p_.edgeInsertRadius;
+		ep2.cellSizeHint       = cellSizeHint;
+		ep2.requireEdgeFeature = p_.edgeInsertRequireFeature;
+		ep2.verbose            = p_.verbose;
+		XFoam_CMshEdgeInserter inserter(pm, brep, ep2);
+		t0 = std::chrono::steady_clock::now();
+		stats.edgeInsertStats = inserter.insert();
+		t1 = std::chrono::steady_clock::now();
+		stats.msEdgeInsert = ms(t0, t1);
+		// 新增的 mesh point 也加入 fixedPoints（已落到 TpEdge，optimizer 别动）
+		for (int pid : inserter.newPoints()) pinnedPts.push_back(pid);
+		stats.nPoints = static_cast<XFoam_Label>(pm.points.size());
+		stats.nFaces  = pm.nFaces();
+		if (p_.verbose)
+		{
+			std::cout << "[cmsh pipeline] edgeInsert done in " << stats.msEdgeInsert
+			          << " ms (boundaryEdges=" << stats.edgeInsertStats.nBoundaryEdges
+			          << ", crossPatch=" << stats.edgeInsertStats.nCrossPatch
+			          << ", inserted=" << stats.edgeInsertStats.nInserted
+			          << ", projFail=" << stats.edgeInsertStats.nProjFail
+			          << ", facesGrown=" << stats.edgeInsertStats.nFacesGrown
+			          << ", maxProjDist=" << stats.edgeInsertStats.maxProjDist << ")\n";
+		}
+	}
+
 	// === 5) optimizer ===
 	if (p_.enableOptimizer)
 	{
@@ -296,6 +351,7 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 		op.minFaceAreaRatio    = p_.optMinFaceAreaRatio;
 		op.verbose             = p_.verbose;
 		XFoam_CMshMeshOptimizer optr(pm, brep, op);
+		if (!pinnedPts.empty()) optr.setFixedPoints(pinnedPts);
 
 		t0 = std::chrono::steady_clock::now();
 		stats.optimizerStats = optr.optimize();
@@ -339,8 +395,8 @@ XFoam_CMshPipeline::run(XFoam_BrepBase& brep, XFoam_CMshPolyMeshGen& pm)
 	if (p_.verbose)
 	{
 		const double total = stats.msOctree + stats.msExtract + stats.msCoverLoop
-		                   + stats.msMapper + stats.msEdge + stats.msOptimizer
-		                   + stats.msRepatch;
+		                   + stats.msMapper + stats.msEdge + stats.msPin
+		                   + stats.msEdgeInsert + stats.msOptimizer + stats.msRepatch;
 		std::cout << "[cmsh pipeline] total " << total << " ms\n";
 	}
 	return stats;

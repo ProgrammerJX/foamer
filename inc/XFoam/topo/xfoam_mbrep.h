@@ -133,6 +133,7 @@ public:
 	{
 		return static_cast<XFoam_Label>(featureVertIdx_.size());
 	}
+	XFoam_Vector3D featureVertexPosition(XFoam_Label i) const override;
 	FeatureKind closestFeature(
 		const XFoam_Vector3D& p,
 		XFoam_Scalar          searchRadius,

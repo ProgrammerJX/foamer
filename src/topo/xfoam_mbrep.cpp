@@ -798,6 +798,15 @@ XFoam_BoundBox XFoam_MBrep::subPatchBounds(XFoam_Label id) const
 	return XFoam_BoundBox();
 }
 
+XFoam_Vector3D XFoam_MBrep::featureVertexPosition(XFoam_Label i) const
+{
+	if (i < 0 || i >= static_cast<XFoam_Label>(featureVertIdx_.size()))
+		return XFoam_Vector3D(0, 0, 0);
+	const XFoam_Label vi = featureVertIdx_[static_cast<std::size_t>(i)];
+	if (vi < 0 || vi >= verts_.size()) return XFoam_Vector3D(0, 0, 0);
+	return verts_[vi].p;
+}
+
 XFoam_Scalar XFoam_MBrep::subPatchMinFeatureLength(XFoam_Label id) const
 {
 	if (id < 0 || id >= faces_.size()) return 0;

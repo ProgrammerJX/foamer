@@ -125,6 +125,15 @@ public:
 	virtual XFoam_Label nFeatureEdges() const = 0;
 	virtual XFoam_Label nFeatureVertices() const = 0;
 
+	/// 第 i 个 feature vertex 的精确位置。i ∈ [0, nFeatureVertices())。
+	/// 用途：B1 TpVertex pinning —— meshOptimizer 阶段把最近 mesh boundary
+	/// 点钉到这个精确位置，让所有 CAD 顶点在 mesh 上 1:1 出现。
+	/// 越界 / 没 feature 时返回 (0,0,0)；调用方应先检查 nFeatureVertices()。
+	virtual XFoam_Vector3D featureVertexPosition(XFoam_Label /*i*/) const
+	{
+		return XFoam_Vector3D(0, 0, 0);
+	}
+
 	/// p 半径 searchRadius 以内最近 feature。feature vertex 在半径内时优先返回
 	/// （snap 到尖角效果更好）。outTangent 仅在 Edge 时填（unit），否则 (0,0,0)。
 	virtual FeatureKind closestFeature(

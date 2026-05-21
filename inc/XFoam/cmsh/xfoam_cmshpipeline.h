@@ -19,6 +19,8 @@
 // 与单独 new 各模块直接调的等价：facade 仅做参数转发 + 顺序串接 + 计时统计；
 // 没有任何隐藏行为。
 
+#include "XFoam/cmsh/xfoam_cmshedgeinserter.h"
+#include "XFoam/cmsh/xfoam_cmshfeaturepinner.h"
 #include "XFoam/cmsh/xfoam_cmshmeshoptimizer.h"
 #include "XFoam/cmsh/xfoam_cmshobjrefine.h"
 #include "XFoam/cmsh/xfoam_cmshpolymeshgen.h"
@@ -100,6 +102,22 @@ public:
 		bool         snapCorners             = true;
 		bool         snapEdges               = true;
 
+		// ---- feature pinner (B1: TpVertex 钉死) ----
+		/// 启用后在 mapper + edge-snap 之后、optimizer 之前跑一遍 pinner：
+		/// 把每个 TpVertex 钉到最近的 mesh boundary 点。被钉死的点会通过
+		/// setFixedPoints 传给后续 optimizer 锁住。
+		bool         enableFeaturePinner     = false;
+		XFoam_Scalar pinRadius               = 0;   ///< 0 = 自动 = 2*cellSize
+
+		// ---- edge inserter (B2: TpEdge densify) ----
+		/// 启用后扫所有 boundary face edge，若两端 mesh 点属于不同 sub-patch，
+		/// 在 edge 中点投影到 TpEdge / surface，把新 point 插进所有相关 face
+		/// 顶点列表里。face 由 N 边变 N+1 边（可能多次 +1）。新点也加入
+		/// optimizer fixedPoints。
+		bool         enableEdgeInsert        = false;
+		XFoam_Scalar edgeInsertRadius        = 0;   ///< 0 = 自动 = cellSize
+		bool         edgeInsertRequireFeature = true; ///< false → 落表面也可
+
 		// ---- optimizer ----
 		bool         enableOptimizer         = false;
 		int          optIter                 = 3;
@@ -126,15 +144,19 @@ public:
 		XFoam_Label nMissingSubs    = 0;  ///< 仍未被命中（geometry 丢）
 		int         coverRounds     = 0;  ///< coverAllFaces 实际跑了几轮
 		XFoam_CMshSurfaceEdgeExtractor::Stats edgeStats;
+		XFoam_CMshFeaturePinner::Stats        pinStats;
+		XFoam_CMshEdgeInserter::Stats         edgeInsertStats;
 		XFoam_CMshMeshOptimizer::Stats        optimizerStats;
 		XFoam_CMshRepatcher::Stats            repatchStats;
-		double msOctree     = 0;
-		double msExtract    = 0;
-		double msMapper     = 0;
-		double msEdge       = 0;
-		double msOptimizer  = 0;
-		double msRepatch    = 0;
-		double msCoverLoop  = 0;
+		double msOctree         = 0;
+		double msExtract        = 0;
+		double msMapper         = 0;
+		double msEdge           = 0;
+		double msPin            = 0;
+		double msEdgeInsert     = 0;
+		double msOptimizer      = 0;
+		double msRepatch        = 0;
+		double msCoverLoop      = 0;
 	};
 
 	explicit XFoam_CMshPipeline(const Params& p);

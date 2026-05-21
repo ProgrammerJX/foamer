@@ -15,7 +15,22 @@ XFoam_CMshMeshOptimizer::XFoam_CMshMeshOptimizer(
 	const Params& p)
 	: pm_(pm), brep_(brep), p_(p)
 {
+	isFixed_.assign(pm_.points.size(), 0);
 	buildBoundaryAdjacency();
+}
+
+void XFoam_CMshMeshOptimizer::setFixedPoints(std::vector<int> fixedPointIds)
+{
+	std::sort(fixedPointIds.begin(), fixedPointIds.end());
+	fixedPointIds.erase(
+		std::unique(fixedPointIds.begin(), fixedPointIds.end()),
+		fixedPointIds.end());
+	isFixed_.assign(pm_.points.size(), 0);
+	for (int pid : fixedPointIds)
+	{
+		if (pid >= 0 && pid < static_cast<int>(isFixed_.size()))
+			isFixed_[static_cast<std::size_t>(pid)] = 1;
+	}
 }
 
 void XFoam_CMshMeshOptimizer::buildBoundaryAdjacency()
@@ -166,6 +181,8 @@ XFoam_CMshMeshOptimizer::Stats XFoam_CMshMeshOptimizer::optimize()
 		// 1) Laplacian
 		for (std::size_t i = 0; i < bndPoints_.size(); ++i)
 		{
+			const int vid = bndPoints_[i];
+			if (!isFixed_.empty() && isFixed_[static_cast<std::size_t>(vid)]) continue;
 			const auto& nb = nbrs_[i];
 			if (nb.empty()) continue;
 			XFoam_Vector3D mean(0, 0, 0);
@@ -176,13 +193,17 @@ XFoam_CMshMeshOptimizer::Stats XFoam_CMshMeshOptimizer::optimize()
 			mean *= static_cast<XFoam_Scalar>(1.0 / static_cast<double>(nb.size()));
 			const XFoam_Vector3D oldP = snap[i];
 			const XFoam_Vector3D newP = oldP + (mean - oldP) * p_.relaxFactor;
-			pm_.points[static_cast<std::size_t>(bndPoints_[i])] = newP;
+			pm_.points[static_cast<std::size_t>(vid)] = newP;
 		}
 
 		// 2) re-project
 		if (p_.reproject && !brep_.empty())
 		{
-			for (int vid : bndPoints_) reprojectOne(vid);
+			for (int vid : bndPoints_)
+			{
+				if (!isFixed_.empty() && isFixed_[static_cast<std::size_t>(vid)]) continue;
+				reprojectOne(vid);
+			}
 		}
 
 		// 3) 可选 feature snap
@@ -190,6 +211,7 @@ XFoam_CMshMeshOptimizer::Stats XFoam_CMshMeshOptimizer::optimize()
 		{
 			for (int vid : bndPoints_)
 			{
+				if (!isFixed_.empty() && isFixed_[static_cast<std::size_t>(vid)]) continue;
 				const XFoam_Vector3D& p = pm_.points[static_cast<std::size_t>(vid)];
 				XFoam_Vector3D q, t;
 				const auto k = brep_.closestFeature(p, R, q, t);
